@@ -1,0 +1,10 @@
+node_modules/
+.expo/
+dist/
+*.pyc
+__pycache__/
+.env
+node-portable/
+git-portable/
+.DS_Store
+*.log
