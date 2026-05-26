@@ -170,6 +170,16 @@ function RootLayoutInner() {
             title: 'WhatsApp API'
           }} 
         />
+        <Stack.Screen 
+          name="export-all" 
+          options={{ 
+            presentation: 'modal',
+            headerShown: true,
+            headerStyle: { backgroundColor: colors.headerBg },
+            headerTintColor: colors.headerTint,
+            title: 'Exportar Dados'
+          }} 
+        />
       </Stack>
     </>
   );

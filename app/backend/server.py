@@ -1612,6 +1612,130 @@ async def export_groups():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
+@api_router.get("/export/events", tags=["Backup & Export"], summary="Export events as CSV")
+async def export_events():
+    """Download all events in CSV format."""
+    try:
+        events = await db.events.find().sort("date", 1).to_list(1000)
+        csv_lines = ["Title,Type,Date,ContactId,Description,isActive"]
+        for ev in events:
+            date_str = ev.get("date", "")
+            if hasattr(date_str, "isoformat"):
+                date_str = date_str.isoformat()
+            csv_lines.append(
+                f'"{ev.get("title", "")}","{ev.get("type", "")}","{date_str}",'
+                f'"{ev.get("contactId", "")}","{ev.get("description", "")}","{ev.get("isActive", True)}"'
+            )
+        csv_content = "\n".join(csv_lines)
+        return {
+            "filename": f"events_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            "content": csv_content,
+            "contentType": "text/csv"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+@api_router.get("/export/scheduled-messages", tags=["Backup & Export"], summary="Export scheduled messages as CSV")
+async def export_scheduled_messages():
+    """Download all scheduled messages in CSV format."""
+    try:
+        msgs = await db.scheduled_messages.find().sort("scheduledTime", 1).to_list(1000)
+        csv_lines = ["Message,ScheduledTime,GroupId,Status,Recurring,Pattern"]
+        for msg in msgs:
+            time_str = msg.get("scheduledTime", "")
+            if hasattr(time_str, "isoformat"):
+                time_str = time_str.isoformat()
+            csv_lines.append(
+                f'"{msg.get("message", "")}","{time_str}","{msg.get("groupId", "")}",'
+                f'"{msg.get("status", "pending")}","{msg.get("isRecurring", False)}","{msg.get("recurringPattern", "")}"'
+            )
+        csv_content = "\n".join(csv_lines)
+        return {
+            "filename": f"scheduled_messages_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            "content": csv_content,
+            "contentType": "text/csv"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+@api_router.get("/export/all", tags=["Backup & Export"], summary="Export all data as XLSX (Excel)")
+async def export_all():
+    """Download all data (contacts, groups, events, scheduled messages) in a single Excel file with multiple sheets."""
+    try:
+        from openpyxl import Workbook
+        wb = Workbook()
+        
+        # ── Contacts sheet ──
+        ws_contacts = wb.active
+        ws_contacts.title = "Contacts"
+        ws_contacts.append(["Name", "Phone", "Tags", "Favorite", "Notes", "CreatedAt"])
+        contacts = await db.contacts.find().to_list(1000)
+        for c in contacts:
+            ws_contacts.append([
+                c.get("name", ""),
+                c.get("phone", ""),
+                ";".join(c.get("tags", [])),
+                "Yes" if c.get("isFavorite") else "No",
+                c.get("notes", ""),
+                str(c.get("createdAt", ""))
+            ])
+        
+        # ── Groups sheet ──
+        ws_groups = wb.create_sheet("Groups")
+        ws_groups.append(["Name", "Color", "MemberCount", "CreatedAt"])
+        groups = await db.groups.find().to_list(1000)
+        for g in groups:
+            ws_groups.append([
+                g.get("name", ""),
+                g.get("color", ""),
+                len(g.get("contactIds", [])),
+                str(g.get("createdAt", ""))
+            ])
+        
+        # ── Events sheet ──
+        ws_events = wb.create_sheet("Events")
+        ws_events.append(["Title", "Type", "Date", "Description", "ContactId", "Recurring", "Active"])
+        events = await db.events.find().sort("date", 1).to_list(1000)
+        for ev in events:
+            date_str = str(ev.get("date", ""))
+            ws_events.append([
+                ev.get("title", ""),
+                ev.get("type", ""),
+                date_str,
+                ev.get("description", ""),
+                ev.get("contactId", ""),
+                "Yes" if ev.get("isRecurring") else "No",
+                "Yes" if ev.get("isActive", True) else "No"
+            ])
+        
+        # ── Scheduled Messages sheet ──
+        ws_sms = wb.create_sheet("ScheduledMessages")
+        ws_sms.append(["Message", "ScheduledTime", "GroupId", "Status", "Recurring", "Pattern"])
+        sms_list = await db.scheduled_messages.find().sort("scheduledTime", 1).to_list(1000)
+        for msg in sms_list:
+            ws_sms.append([
+                msg.get("message", ""),
+                str(msg.get("scheduledTime", "")),
+                msg.get("groupId", ""),
+                msg.get("status", "pending"),
+                "Yes" if msg.get("isRecurring") else "No",
+                msg.get("recurringPattern", "")
+            ])
+        
+        xlsx_buffer = BytesIO()
+        wb.save(xlsx_buffer)
+        xlsx_buffer.seek(0)
+        
+        return {
+            "filename": f"whatsapp_organizer_full_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            "content": xlsx_buffer.getvalue(),
+            "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+    except ImportError:
+        raise HTTPException(status_code=500, detail="openpyxl not installed. Run: pip install openpyxl")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
 @app.get("/download/backup", tags=["Backup & Export"], summary="Download backup as ZIP")
 async def download_backup():
     """Generate and download a complete backup as a ZIP archive."""

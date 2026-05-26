@@ -11,8 +11,8 @@ Sempre que um novo agente (AI) for iniciar a execução deste projeto, ele deve:
 
 ---
 
-## Estado Atual: Fase 4.2 Completa
-## Próximo Item: Fase 4.3 - Plugin WhatsApp Business API
+## Estado Atual: Fase 4.3 Completa
+## Próximo Item: Fase 4.4 - Exportação Completa (CSV/Excel)
 
 ---
 
@@ -198,10 +198,25 @@ async def import_device_groups(groups: List[dict]):
 - Ícone pulse no header do tab navigator → /webhooks ✅
 - Rota registrada em `_layout.tsx` ✅
 
-#### 4.3 Plugin WhatsApp Business API
-- Integração real com WhatsApp Business API
-- Envio real de mensagens
-- Status de entrega
+#### 4.3 Plugin WhatsApp Business API ✅
+- Integração real com WhatsApp Cloud API ✅
+- Envio real de mensagens ✅
+- Status de entrega (sent, delivered, read, failed) ✅
+
+**Backend:**
+- Modelo `WhatsAppConfigCreate/Update/Response` + `WhatsAppMessageStatus` ✅
+- CRUD: `POST/GET/PUT /api/whatsapp/config` ✅
+- Status: `GET /api/whatsapp/status` ✅
+- Webhook receiver: `GET/POST /whatsapp/webhook` (verificação + callbacks) ✅
+- `send_single_whatsapp_message()` — POST `/{phoneNumberId}/messages` na Cloud API ✅
+- `send_whatsapp_message()` — envia para todos os contatos de um grupo ✅
+- Trackeamento de message ID e atualização de status via webhook ✅
+- Link com `scheduled_messages` para atualizar status automaticamente ✅
+
+**Frontend:**
+- `app/whatsapp.tsx` — configuração (Phone ID, Token, Business ID, Secret) + status das mensagens ✅
+- Ícone WhatsApp verde no header do tab navigator → /whatsapp ✅
+- Rota registrada em `_layout.tsx` ✅
 
 #### 4.4 Exportação Completa (CSV/Excel)
 - Exportar eventos e agendamentos
@@ -273,5 +288,5 @@ EXPO_PUBLIC_BACKEND_URL=http://localhost:8000
 | 3.4 | API Externa | ✅ Completo | 26/05/2026 |
 | 4.1 | Integração com CRM | ✅ Completo | 26/05/2026 |
 | 4.2 | Webhook para Eventos | ✅ Completo | 26/05/2026 |
-| 4.3 | Plugin WhatsApp Business API | ❌ Pendente | - |
+| 4.3 | Plugin WhatsApp Business API | ✅ Completo | 26/05/2026 |
 | 4.4 | Exportação Completa (CSV/Excel) | ❌ Pendente | - |

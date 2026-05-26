@@ -1,8 +1,8 @@
 # CHECKPOINT - WhatsApp Contact Organizer
 
 ## Data: 26/05/2026
-## Última ação concluída: Webhook para Eventos (Fase 4.2)
-## Status: ✅ FASE 4.2 COMPLETA
+## Última ação concluída: WhatsApp Business API (Fase 4.3)
+## Status: ✅ FASE 4.3 COMPLETA
 
 ---
 
@@ -117,7 +117,7 @@
 
 ### 4.1 Integração com CRM ✅
 ### 4.2 Webhook para Eventos ✅
-### 4.3 Plugin para WhatsApp Business API ❌
+### 4.3 Plugin para WhatsApp Business API ✅
 ### 4.4 Exportação para CSV/Excel (parcial - contatos OK, grupos OK) ❌
 
 ---
@@ -160,8 +160,7 @@ APP WHATS/
 
 Para continuar, execute na ordem:
 
-1. **Fase 4.3** - Plugin WhatsApp Business API
-2. **Fase 4.4** - Exportação Completa (CSV/Excel)
+1. **Fase 4.4** - Exportação Completa (CSV/Excel)
 3. **Fase 4.4** - Exportação Completa (CSV/Excel)
 3. **Fase 4.3** - Plugin WhatsApp Business API
 4. **Fase 4.4** - Exportação Completa (CSV/Excel)
@@ -439,6 +438,55 @@ Para continuar, execute na ordem:
 | `app/frontend/app/_layout.tsx` | +rota webhooks como modal |
 | `app/frontend/app/(tabs)/_layout.tsx` | +ícone pulse no header → /webhooks |
 
+## ✅ Fase 4.3 — Plugin WhatsApp Business API (26/05/2026)
+
+### O que foi feito
+
+**Backend (`server.py`):**
+
+1. **Modelos:**
+   - `WhatsAppConfigCreate` (phoneNumberId, accessToken, businessAccountId, webhookSecret, organizationId)
+   - `WhatsAppConfigUpdate` (todos opcionais + isActive)
+   - `WhatsAppConfigResponse` (id, phoneNumberId, businessAccountId, isActive, timestamps)
+   - `WhatsAppMessageStatus` (externalMessageId, scheduledMessageId, recipientPhone, status, timestamp)
+2. **Helpers:** `whatsapp_config_helper()`, `whatsapp_message_status_helper()`
+3. **Config endpoints:**
+   - `POST /api/whatsapp/config` — cria/sobrescreve config (desativa anteriores da org)
+   - `GET /api/whatsapp/config` — retorna config ativa
+   - `PUT /api/whatsapp/config` — atualiza config existente
+4. **Status endpoint:**
+   - `GET /api/whatsapp/status?phone=&limit=` — lista status de mensagens
+5. **Webhook receiver (fora do `/api` prefixo):**
+   - `GET /whatsapp/webhook` — verificação do Meta (hub.mode, hub.verify_token, hub.challenge)
+   - `POST /whatsapp/webhook` — recebe callbacks de status (sent/delivered/read/failed)
+   - Atualiza `whatsapp_message_status` e propaga para `scheduled_messages`
+6. **Envio real via WhatsApp Cloud API:**
+   - `_get_whatsapp_config()` — busca config ativa no MongoDB
+   - `send_single_whatsapp_message()` — POST `https://graph.facebook.com/v18.0/{phoneNumberId}/messages`
+   - `send_whatsapp_message()` — itera contatos do grupo e chama `send_single_whatsapp_message`
+   - Trackeia message ID e armazena no MongoDB
+7. **Atualização do `send_scheduled_message`:**
+   - Usa `send_whatsapp_message()` real em vez do placeholder
+   - Marca como `sent`/`failed` baseado nos resultados
+
+**Frontend — `app/whatsapp.tsx`:**
+
+1. **Banner de aviso** — WhatsApp não configurado
+2. **Formulário** — Phone Number ID, Access Token (secure), Business Account ID, Webhook Secret
+3. **Card de config** — mostra Phone ID, Business ID, status, data de atualização
+4. **Status de mensagens** — lista com ícones (sent/delivered/read/failed) + cores + timestamp
+5. **Botão WhatsApp** — verde `#25D366` no header → `/whatsapp`
+6. **Estado vazio** — mensagem "Nenhuma mensagem enviada"
+
+**Arquivos criados/modificados:**
+
+| Arquivo | Mudança |
+|---------|---------|
+| `app/backend/server.py` | +modelos WhatsApp + helpers + config CRUD + webhook receiver + Cloud API sender |
+| `app/frontend/app/whatsapp.tsx` | **Novo** — tela de configuração WhatsApp |
+| `app/frontend/app/_layout.tsx` | +rota whatsapp como modal |
+| `app/frontend/app/(tabs)/_layout.tsx` | +ícone WhatsApp verde no header → /whatsapp |
+
 ## ✅ Fase 3.4 — API Externa (26/05/2026)
 
 ### O que foi feito
@@ -612,6 +660,7 @@ APP WHATS/
 │           ├── api-keys.tsx       # Gerenciamento de API Keys ✅
 │           ├── crm.tsx            # Integração CRM ✅
 │           ├── webhooks.tsx       # Webhook event system ✅
+│           ├── whatsapp.tsx       # WhatsApp Business API config ✅
 │           └── (tabs)/
 │               ├── _layout.tsx    # Tema dinâmico ✅
 │               ├── contacts.tsx   # + cache offline ✅
