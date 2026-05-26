@@ -1,7 +1,8 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
@@ -16,6 +17,10 @@ from datetime import datetime, timezone, timedelta
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 import asyncio
+import secrets
+import hashlib
+import time
+from collections import defaultdict, deque
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -26,8 +31,101 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 # Create the main app
-app = FastAPI()
+app = FastAPI(
+    title="WhatsApp Contact Organizer API",
+    description="REST API for managing contacts, groups, events, and scheduled messages with multi-organization support, JWT authentication, and API key integration.",
+    version="1.0.0",
+    contact={
+        "name": "API Support",
+        "url": "https://github.com/Jbvbc/whatsapp-organizer",
+    },
+    openapi_tags=[
+        {"name": "Auth", "description": "User registration, login, and profile"},
+        {"name": "Contacts", "description": "Manage contacts (CRUD, sync, search)"},
+        {"name": "Groups", "description": "Manage contact groups"},
+        {"name": "Events", "description": "Manage events and birthday notifications"},
+        {"name": "Scheduled Messages", "description": "Schedule and manage WhatsApp messages"},
+        {"name": "Organizations", "description": "Multi-organization management (admin only)"},
+        {"name": "API Keys", "description": "API key management for integrations (admin only)"},
+        {"name": "Reports", "description": "Dashboard statistics and activity reports"},
+        {"name": "Backup & Export", "description": "Backup, restore, and data export"},
+    ],
+)
 api_router = APIRouter(prefix="/api")
+
+# ─── Rate Limiter ───────────────────────────────────────
+class RateLimiter:
+    def __init__(self, requests_per_minute: int = 60):
+        self.rpm = requests_per_minute
+        self._buckets: dict[str, deque] = defaultdict(lambda: deque())
+
+    def check(self, key: str) -> bool:
+        now = time.time()
+        bucket = self._buckets[key]
+        # Purge old entries
+        while bucket and bucket[0] < now - 60:
+            bucket.popleft()
+        if len(bucket) >= self.rpm:
+            return False
+        bucket.append(now)
+        return True
+
+rate_limiter = RateLimiter(120)  # 120 requests/minute per client
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Skip rate limiting for docs and openapi
+        path = request.url.path
+        if path in ("/docs", "/openapi.json", "/redoc"):
+            return await call_next(request)
+
+        client_key = request.client.host if request.client else "unknown"
+        # Use API key or JWT user for more granular limiting
+        api_key = request.headers.get("x-api-key")
+        if api_key:
+            client_key = f"apikey:{api_key[:8]}"
+        elif "authorization" in request.headers:
+            client_key = f"jwt:{client_key}"
+
+        if not rate_limiter.check(client_key):
+            raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+        return await call_next(request)
+
+# ─── API Key Helpers ────────────────────────────────────
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def hash_api_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+def generate_api_key() -> str:
+    return f"wco_{secrets.token_urlsafe(32)}"
+
+async def get_api_key_user(api_key: str = Depends(api_key_header)):
+    """Dependency to authenticate via X-API-Key header (alternative to JWT)"""
+    if not api_key:
+        return None
+    hashed = hash_api_key(api_key)
+    doc = await db.api_keys.find_one({"keyHash": hashed, "isActive": True})
+    if not doc:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    # Update last used
+    await db.api_keys.update_one({"_id": doc["_id"]}, {"$set": {"lastUsedAt": datetime.utcnow()}})
+    return {
+        "id": str(doc["_id"]),
+        "name": doc.get("name", "API Key"),
+        "role": "editor",  # API keys get editor-level access
+        "scopes": doc.get("scopes", []),
+        "source": "api_key"
+    }
+
+async def get_current_user_or_api_key(
+    jwt_user: dict = Depends(get_current_user),
+    api_key_user: dict = Depends(get_api_key_user),
+):
+    """Accept either JWT or API key authentication"""
+    if api_key_user:
+        return api_key_user
+    return jwt_user
 
 # Auth config
 SECRET_KEY = os.environ.get("JWT_SECRET", "super-secret-key-change-in-production")
@@ -98,9 +196,9 @@ def require_role(*roles: str):
     return role_checker
 
 # Auth Routes
-@api_router.post("/auth/register", response_model=TokenResponse)
+@api_router.post("/auth/register", response_model=TokenResponse, tags=["Auth"], summary="Register a new user")
 async def register(user: UserCreate):
-    """Register a new user"""
+    """Register a new user. First user becomes admin, subsequent users become viewer."""
     existing = await db.users.find_one({"email": user.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -133,9 +231,9 @@ async def register(user: UserCreate):
         )
     )
 
-@api_router.post("/auth/login", response_model=TokenResponse)
+@api_router.post("/auth/login", response_model=TokenResponse, tags=["Auth"], summary="Login and get JWT token")
 async def login(user: UserLogin):
-    """Login and get JWT token"""
+    """Authenticate with email and password. Returns a JWT token valid for 30 days."""
     db_user = await db.users.find_one({"email": user.email})
     if not db_user or not verify_password(user.password, db_user["password"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -154,9 +252,9 @@ async def login(user: UserLogin):
         )
     )
 
-@api_router.get("/auth/me", response_model=UserResponse)
+@api_router.get("/auth/me", response_model=UserResponse, tags=["Auth"], summary="Get current user profile")
 async def get_me(user: dict = Depends(get_current_user)):
-    """Get current user info"""
+    """Returns the authenticated user's profile information including email, name, and role."""
     return UserResponse(**user)
 
 # Models
@@ -253,6 +351,19 @@ class OrganizationUpdate(BaseModel):
     color: Optional[str] = None
     description: Optional[str] = None
 
+class ApiKeyCreate(BaseModel):
+    name: str = Field(description="Friendly name for this API key")
+    scopes: List[str] = Field(default=[], description="Allowed scopes (e.g. ['contacts:read', 'messages:write'])")
+
+class ApiKeyResponse(BaseModel):
+    id: str
+    name: str
+    key: Optional[str] = None  # Only returned on creation
+    scopes: List[str] = []
+    isActive: bool = True
+    lastUsedAt: Optional[datetime] = None
+    createdAt: datetime
+
 # Helper function to convert ObjectId to string
 def contact_helper(contact) -> dict:
     return {
@@ -304,6 +415,16 @@ def organization_helper(org) -> dict:
         "updatedAt": org.get("updatedAt")
     }
 
+def api_key_helper(doc) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "name": doc["name"],
+        "scopes": doc.get("scopes", []),
+        "isActive": doc.get("isActive", True),
+        "lastUsedAt": doc.get("lastUsedAt"),
+        "createdAt": doc["createdAt"]
+    }
+
 def event_helper(event) -> dict:
     return {
         "id": str(event["_id"]),
@@ -321,9 +442,9 @@ def event_helper(event) -> dict:
     }
 
 # Contact Routes
-@api_router.post("/contacts/sync")
+@api_router.post("/contacts/sync", tags=["Contacts"], summary="Sync contacts from device")
 async def sync_contacts(contacts: List[Contact]):
-    """Sync contacts from device"""
+    """Import contacts from the device. Duplicates are skipped based on phone number."""
     synced_count = 0
     for contact in contacts:
         # Check if contact already exists by phone
@@ -336,7 +457,7 @@ async def sync_contacts(contacts: List[Contact]):
             synced_count += 1
     return {"message": f"Synced {synced_count} new contacts", "count": synced_count}
 
-@api_router.get("/contacts")
+@api_router.get("/contacts", tags=["Contacts"], summary="List all contacts with filters")
 async def get_contacts(
     search: Optional[str] = None,
     tag: Optional[str] = None,
@@ -374,17 +495,17 @@ async def get_contacts(
     contacts = await db.contacts.find(query).sort("name", 1).to_list(1000)
     return [contact_helper(contact) for contact in contacts]
 
-@api_router.get("/contacts/{contact_id}")
+@api_router.get("/contacts/{contact_id}", tags=["Contacts"], summary="Get a single contact")
 async def get_contact(contact_id: str):
-    """Get a single contact"""
+    """Returns detailed information about a specific contact by ID."""
     contact = await db.contacts.find_one({"_id": ObjectId(contact_id)})
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
     return contact_helper(contact)
 
-@api_router.put("/contacts/{contact_id}")
+@api_router.put("/contacts/{contact_id}", tags=["Contacts"], summary="Update a contact")
 async def update_contact(contact_id: str, update: ContactUpdate):
-    """Update a contact"""
+    """Partially update a contact. Only provided fields will be modified."""
     update_data = {k: v for k, v in update.dict().items() if v is not None}
     if update_data:
         update_data["updatedAt"] = datetime.utcnow()
@@ -398,17 +519,17 @@ async def update_contact(contact_id: str, update: ContactUpdate):
     contact = await db.contacts.find_one({"_id": ObjectId(contact_id)})
     return contact_helper(contact)
 
-@api_router.delete("/contacts/{contact_id}")
+@api_router.delete("/contacts/{contact_id}", tags=["Contacts"], summary="Delete a contact")
 async def delete_contact(contact_id: str):
-    """Delete a contact"""
+    """Permanently remove a contact from the database."""
     result = await db.contacts.delete_one({"_id": ObjectId(contact_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Contact not found")
     return {"message": "Contact deleted successfully"}
 
-@api_router.get("/tags")
+@api_router.get("/tags", tags=["Contacts"], summary="Get all unique tags")
 async def get_all_tags(organizationId: Optional[str] = None):
-    """Get all unique tags"""
+    """Returns a sorted list of all unique tags used across contacts."""
     query = {}
     if organizationId:
         query["organizationId"] = organizationId
@@ -416,32 +537,31 @@ async def get_all_tags(organizationId: Optional[str] = None):
     return {"tags": sorted([tag for tag in tags if tag])}
 
 # Group Routes
-@api_router.post("/groups")
+@api_router.post("/groups", tags=["Groups"], summary="Create a new group")
 async def create_group(group: Group):
-    """Create a new group"""
+    """Create a new contact group with optional color and member list."""
     group_dict = group.dict(exclude={"id"})
     group_dict["createdAt"] = datetime.utcnow()
     result = await db.groups.insert_one(group_dict)
     group_dict["_id"] = result.inserted_id
     return group_helper(group_dict)
 
-@api_router.get("/groups")
+@api_router.get("/groups", tags=["Groups"], summary="List all groups")
 async def get_groups(organizationId: Optional[str] = None):
-    """Get all groups"""
+    """Returns all groups, optionally filtered by organization."""
     query = {}
     if organizationId:
         query["organizationId"] = organizationId
     groups = await db.groups.find(query).sort("name", 1).to_list(100)
     return [group_helper(group) for group in groups]
 
-@api_router.get("/groups/{group_id}")
+@api_router.get("/groups/{group_id}", tags=["Groups"], summary="Get group details with contacts")
 async def get_group(group_id: str):
-    """Get a single group with contacts"""
+    """Returns a group with its associated contacts populated."""
     group = await db.groups.find_one({"_id": ObjectId(group_id)})
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
     
-    # Get contacts in group
     contact_ids = [ObjectId(cid) for cid in group.get("contactIds", [])]
     contacts = await db.contacts.find({"_id": {"$in": contact_ids}}).to_list(1000)
     
@@ -449,9 +569,9 @@ async def get_group(group_id: str):
     result["contacts"] = [contact_helper(contact) for contact in contacts]
     return result
 
-@api_router.put("/groups/{group_id}")
+@api_router.put("/groups/{group_id}", tags=["Groups"], summary="Update a group")
 async def update_group(group_id: str, update: GroupUpdate):
-    """Update a group"""
+    """Partially update group name, color, or member list."""
     update_data = {k: v for k, v in update.dict().items() if v is not None}
     if update_data:
         result = await db.groups.update_one(
@@ -464,9 +584,9 @@ async def update_group(group_id: str, update: GroupUpdate):
     group = await db.groups.find_one({"_id": ObjectId(group_id)})
     return group_helper(group)
 
-@api_router.delete("/groups/{group_id}")
+@api_router.delete("/groups/{group_id}", tags=["Groups"], summary="Delete a group")
 async def delete_group(group_id: str):
-    """Delete a group"""
+    """Permanently remove a group. Contacts are not deleted."""
     result = await db.groups.delete_one({"_id": ObjectId(group_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Group not found")
@@ -477,9 +597,9 @@ class ImportGroup(BaseModel):
     color: Optional[str] = "#4A90E2"
     contactPhones: List[str] = []
 
-@api_router.post("/groups/import")
+@api_router.post("/groups/import", tags=["Groups"], summary="Import groups in bulk")
 async def import_groups(groups: List[ImportGroup]):
-    """Import multiple groups at once, avoiding duplicates by name"""
+    """Import multiple groups at once, avoiding duplicates by name. Contacts are resolved by phone number."""
     imported = 0
     skipped = 0
     for group in groups:
@@ -506,9 +626,9 @@ async def import_groups(groups: List[ImportGroup]):
     return {"imported": imported, "skipped": skipped, "total": len(groups)}
 
 # Organization Routes
-@api_router.post("/organizations", dependencies=[Depends(require_role("admin"))])
+@api_router.post("/organizations", tags=["Organizations"], dependencies=[Depends(require_role("admin"))])
 async def create_organization(org: Organization):
-    """Create a new organization"""
+    """Create a new organization (admin only). The organization is used to isolate contacts, groups, events, and messages."""
     org_dict = org.dict(exclude={"id"})
     now = datetime.utcnow()
     org_dict["createdAt"] = now
@@ -517,23 +637,23 @@ async def create_organization(org: Organization):
     org_dict["_id"] = result.inserted_id
     return organization_helper(org_dict)
 
-@api_router.get("/organizations", dependencies=[Depends(require_role("admin"))])
+@api_router.get("/organizations", tags=["Organizations"], dependencies=[Depends(require_role("admin"))])
 async def get_organizations():
-    """Get all organizations"""
+    """List all organizations (admin only)."""
     orgs = await db.organizations.find().sort("name", 1).to_list(100)
     return [organization_helper(org) for org in orgs]
 
-@api_router.get("/organizations/{org_id}", dependencies=[Depends(require_role("admin"))])
+@api_router.get("/organizations/{org_id}", tags=["Organizations"], dependencies=[Depends(require_role("admin"))])
 async def get_organization(org_id: str):
-    """Get a single organization"""
+    """Get details of a single organization (admin only)."""
     org = await db.organizations.find_one({"_id": ObjectId(org_id)})
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     return organization_helper(org)
 
-@api_router.put("/organizations/{org_id}", dependencies=[Depends(require_role("admin"))])
+@api_router.put("/organizations/{org_id}", tags=["Organizations"], dependencies=[Depends(require_role("admin"))])
 async def update_organization(org_id: str, update: OrganizationUpdate):
-    """Update an organization"""
+    """Update an organization's name, color, or description (admin only)."""
     update_data = {k: v for k, v in update.dict().items() if v is not None}
     if update_data:
         update_data["updatedAt"] = datetime.utcnow()
@@ -547,21 +667,69 @@ async def update_organization(org_id: str, update: OrganizationUpdate):
     org = await db.organizations.find_one({"_id": ObjectId(org_id)})
     return organization_helper(org)
 
-@api_router.delete("/organizations/{org_id}", dependencies=[Depends(require_role("admin"))])
+@api_router.delete("/organizations/{org_id}", tags=["Organizations"], dependencies=[Depends(require_role("admin"))])
 async def delete_organization(org_id: str):
-    """Delete an organization"""
+    """Delete an organization (admin only). This does NOT cascade-delete associated data."""
     result = await db.organizations.delete_one({"_id": ObjectId(org_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Organization not found")
     return {"message": "Organization deleted successfully"}
 
+# API Key Routes
+@api_router.post("/api-keys", response_model=ApiKeyResponse, tags=["API Keys"], dependencies=[Depends(require_role("admin"))])
+async def create_api_key(key_data: ApiKeyCreate, user: dict = Depends(get_current_user)):
+    """Create a new API key for external integrations. The full key is only shown once on creation."""
+    raw_key = generate_api_key()
+    doc = {
+        "name": key_data.name,
+        "keyHash": hash_api_key(raw_key),
+        "scopes": key_data.scopes,
+        "userId": user["id"],
+        "isActive": True,
+        "lastUsedAt": None,
+        "createdAt": datetime.utcnow()
+    }
+    result = await db.api_keys.insert_one(doc)
+    return ApiKeyResponse(
+        id=str(result.inserted_id),
+        name=doc["name"],
+        key=raw_key,
+        scopes=doc["scopes"],
+        isActive=True,
+        createdAt=doc["createdAt"]
+    )
+
+@api_router.get("/api-keys", tags=["API Keys"], dependencies=[Depends(require_role("admin"))])
+async def list_api_keys(user: dict = Depends(get_current_user)):
+    """List all API keys for the current user. The actual key values are never returned."""
+    docs = await db.api_keys.find({"userId": user["id"]}).sort("createdAt", -1).to_list(100)
+    return [api_key_helper(d) for d in docs]
+
+@api_router.delete("/api-keys/{key_id}", tags=["API Keys"], dependencies=[Depends(require_role("admin"))])
+async def delete_api_key(key_id: str, user: dict = Depends(get_current_user)):
+    """Permanently delete an API key. Integrations using this key will stop working."""
+    result = await db.api_keys.delete_one({"_id": ObjectId(key_id), "userId": user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return {"message": "API key deleted successfully"}
+
+@api_router.post("/api-keys/{key_id}/toggle", tags=["API Keys"], dependencies=[Depends(require_role("admin"))])
+async def toggle_api_key(key_id: str, user: dict = Depends(get_current_user)):
+    """Enable or disable an API key without deleting it."""
+    doc = await db.api_keys.find_one({"_id": ObjectId(key_id), "userId": user["id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="API key not found")
+    new_status = not doc.get("isActive", True)
+    await db.api_keys.update_one({"_id": ObjectId(key_id)}, {"$set": {"isActive": new_status}})
+    return {"id": key_id, "isActive": new_status}
+
 # Include router
 app.include_router(api_router)
 
 # Scheduled Message Routes
-@api_router.post("/scheduled-messages")
+@api_router.post("/scheduled-messages", tags=["Scheduled Messages"], summary="Create a scheduled message")
 async def create_scheduled_message(scheduled_message: ScheduledMessage):
-    """Create a new scheduled message"""
+    """Schedule a message to be sent to a group at a specific time. Supports recurring patterns (daily, weekly, monthly)."""
     scheduled_message_dict = scheduled_message.dict(exclude={"id"})
     scheduled_message_dict["createdAt"] = datetime.utcnow()
     scheduled_message_dict["updatedAt"] = datetime.utcnow()
@@ -569,9 +737,9 @@ async def create_scheduled_message(scheduled_message: ScheduledMessage):
     scheduled_message_dict["_id"] = result.inserted_id
     return scheduled_message_helper(scheduled_message_dict)
 
-@api_router.get("/scheduled-messages")
+@api_router.get("/scheduled-messages", tags=["Scheduled Messages"], summary="List scheduled messages")
 async def get_scheduled_messages(group_id: Optional[str] = None, status: Optional[str] = None, active: Optional[bool] = None, organizationId: Optional[str] = None):
-    """Get all scheduled messages with optional filters"""
+    """Returns scheduled messages with optional filters by group, status, and activity."""
     query = {}
     if group_id:
         query["groupId"] = group_id
@@ -585,17 +753,17 @@ async def get_scheduled_messages(group_id: Optional[str] = None, status: Optiona
     scheduled_messages = await db.scheduled_messages.find(query).sort("scheduledTime", 1).to_list(1000)
     return [scheduled_message_helper(msg) for msg in scheduled_messages]
 
-@api_router.get("/scheduled-messages/{message_id}")
+@api_router.get("/scheduled-messages/{message_id}", tags=["Scheduled Messages"], summary="Get a scheduled message")
 async def get_scheduled_message(message_id: str):
-    """Get a single scheduled message"""
+    """Returns details of a specific scheduled message."""
     scheduled_message = await db.scheduled_messages.find_one({"_id": ObjectId(message_id)})
     if not scheduled_message:
         raise HTTPException(status_code=404, detail="Scheduled message not found")
     return scheduled_message_helper(scheduled_message)
 
-@api_router.put("/scheduled-messages/{message_id}")
+@api_router.put("/scheduled-messages/{message_id}", tags=["Scheduled Messages"], summary="Update a scheduled message")
 async def update_scheduled_message(message_id: str, update: ScheduledMessageUpdate):
-    """Update a scheduled message"""
+    """Partially update a scheduled message (message text, time, recurrence, status)."""
     update_data = {k: v for k, v in update.dict().items() if v is not None}
     if update_data:
         update_data["updatedAt"] = datetime.utcnow()
@@ -609,17 +777,17 @@ async def update_scheduled_message(message_id: str, update: ScheduledMessageUpda
     scheduled_message = await db.scheduled_messages.find_one({"_id": ObjectId(message_id)})
     return scheduled_message_helper(scheduled_message)
 
-@api_router.delete("/scheduled-messages/{message_id}")
+@api_router.delete("/scheduled-messages/{message_id}", tags=["Scheduled Messages"], summary="Delete a scheduled message")
 async def delete_scheduled_message(message_id: str):
-    """Delete a scheduled message"""
+    """Permanently remove a scheduled message."""
     result = await db.scheduled_messages.delete_one({"_id": ObjectId(message_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Scheduled message not found")
     return {"message": "Scheduled message deleted successfully"}
 
-@app.post("/api/scheduled-messages/send")
+@app.post("/api/scheduled-messages/send", tags=["Scheduled Messages"], summary="Send a scheduled message immediately")
 async def send_scheduled_message(message_id: str):
-    """Send a scheduled message immediately"""
+    """Trigger immediate delivery of a pending scheduled message."""
     scheduled_message = await db.scheduled_messages.find_one({"_id": ObjectId(message_id)})
     if not scheduled_message:
         raise HTTPException(status_code=404, detail="Scheduled message not found")
@@ -655,9 +823,9 @@ def send_whatsapp_message(group: dict, message: str):
     return True
 
 # Backup and Restore Routes
-@api_router.get("/backup")
+@api_router.get("/backup", tags=["Backup & Export"], summary="Create a full backup")
 async def create_backup():
-    """Create a backup of all data"""
+    """Creates a ZIP backup containing all contacts, groups, and scheduled messages as JSON."""
     try:
         # Create backup data
         backup_data = {
@@ -705,9 +873,9 @@ async def create_backup():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
 
-@api_router.post("/restore")
+@api_router.post("/restore", tags=["Backup & Export"], summary="Restore from backup")
 async def restore_backup(backup_data: dict):
-    """Restore data from backup"""
+    """Restore contacts, groups, and scheduled messages from a backup JSON object."""
     try:
         # Clear existing data (optional - add confirmation in production)
         # await db.contacts.delete_many({})
@@ -739,9 +907,9 @@ async def restore_backup(backup_data: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Restore failed: {str(e)}")
 
-@api_router.get("/export/contacts")
+@api_router.get("/export/contacts", tags=["Backup & Export"], summary="Export contacts as CSV")
 async def export_contacts():
-    """Export contacts as CSV"""
+    """Download all contacts in CSV format for use in spreadsheets."""
     try:
         contacts = await db.contacts.find().to_list(1000)
         
@@ -762,9 +930,9 @@ async def export_contacts():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
-@api_router.get("/export/groups")
+@api_router.get("/export/groups", tags=["Backup & Export"], summary="Export groups as JSON")
 async def export_groups():
-    """Export groups as JSON"""
+    """Download all groups in JSON format."""
     try:
         groups = await db.groups.find().to_list(1000)
         
@@ -777,9 +945,9 @@ async def export_groups():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
-@app.get("/download/backup")
+@app.get("/download/backup", tags=["Backup & Export"], summary="Download backup as ZIP")
 async def download_backup():
-    """Download backup file"""
+    """Generate and download a complete backup as a ZIP archive."""
     try:
         backup_response = await create_backup()
         
@@ -793,9 +961,9 @@ async def download_backup():
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
 # Event Routes
-@api_router.post("/events")
+@api_router.post("/events", tags=["Events"], summary="Create a new event")
 async def create_event(event: Event):
-    """Create a new event"""
+    """Create a new event (birthday, anniversary, custom) with optional recurrence."""
     event_dict = event.dict(exclude={"id"})
     event_dict["createdAt"] = datetime.utcnow()
     event_dict["updatedAt"] = datetime.utcnow()
@@ -803,7 +971,7 @@ async def create_event(event: Event):
     event_dict["_id"] = result.inserted_id
     return event_helper(event_dict)
 
-@api_router.get("/events")
+@api_router.get("/events", tags=["Events"], summary="List all events with filters")
 async def get_events(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
@@ -812,7 +980,7 @@ async def get_events(
     active: Optional[bool] = None,
     organizationId: Optional[str] = None
 ):
-    """Get all events with optional filters"""
+    """Returns events filtered by date range, type, contact, and active status."""
     query = {}
     
     if start_date or end_date:
@@ -837,17 +1005,17 @@ async def get_events(
     events = await db.events.find(query).sort("date", 1).to_list(1000)
     return [event_helper(event) for event in events]
 
-@api_router.get("/events/{event_id}")
+@api_router.get("/events/{event_id}", tags=["Events"], summary="Get a single event")
 async def get_event(event_id: str):
-    """Get a single event"""
+    """Returns details of a specific event by ID."""
     event = await db.events.find_one({"_id": ObjectId(event_id)})
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
     return event_helper(event)
 
-@api_router.put("/events/{event_id}")
+@api_router.put("/events/{event_id}", tags=["Events"], summary="Update an event")
 async def update_event(event_id: str, update: EventUpdate):
-    """Update an event"""
+    """Partially update event details (title, date, type, recurrence, etc.)."""
     update_data = {k: v for k, v in update.dict().items() if v is not None}
     if update_data:
         update_data["updatedAt"] = datetime.utcnow()
@@ -861,17 +1029,17 @@ async def update_event(event_id: str, update: EventUpdate):
     event = await db.events.find_one({"_id": ObjectId(event_id)})
     return event_helper(event)
 
-@api_router.delete("/events/{event_id}")
+@api_router.delete("/events/{event_id}", tags=["Events"], summary="Delete an event")
 async def delete_event(event_id: str):
-    """Delete an event"""
+    """Permanently remove an event."""
     result = await db.events.delete_one({"_id": ObjectId(event_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Event not found")
     return {"message": "Event deleted successfully"}
 
-@api_router.get("/events/upcoming")
+@api_router.get("/events/upcoming", tags=["Events"], summary="Get upcoming events")
 async def get_upcoming_events(days_ahead: int = 7, organizationId: Optional[str] = None):
-    """Get upcoming events within specified days"""
+    """Returns active events within the next N days (default 7)."""
     start_date = datetime.utcnow()
     end_date = start_date + timedelta(days=days_ahead)
     
@@ -886,9 +1054,9 @@ async def get_upcoming_events(days_ahead: int = 7, organizationId: Optional[str]
     
     return [event_helper(event) for event in events]
 
-@app.post("/api/events/birthday-check")
+@app.post("/api/events/birthday-check", tags=["Events"], summary="Auto-detect birthdays and create events")
 async def check_birthdays():
-    """Check for birthdays and create events if needed"""
+    """Scans contacts with birthday field and creates yearly recurring events if they don't exist."""
     try:
         today = datetime.utcnow()
         
@@ -936,9 +1104,9 @@ async def check_birthdays():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Birthday check failed: {str(e)}")
 
-@app.post("/api/events/notification")
+@app.post("/api/events/notification", tags=["Events"], summary="Send a notification for an event")
 async def send_event_notification(event_id: str):
-    """Send notification for an event"""
+    """Trigger a push notification for a specific event. (Placeholder - requires push service integration.)"""
     try:
         event = await db.events.find_one({"_id": ObjectId(event_id)})
         if not event:
@@ -971,9 +1139,9 @@ async def send_event_notification(event_id: str):
         raise HTTPException(status_code=500, detail=f"Notification failed: {str(e)}")
 
 # Report Routes
-@api_router.get("/reports/contacts-summary")
+@api_router.get("/reports/contacts-summary", tags=["Reports"], summary="Get contacts summary statistics")
 async def get_contacts_summary(organizationId: Optional[str] = None):
-    """Get summary statistics about contacts"""
+    """Returns dashboard metrics: total contacts, favorites, groups, events, pending messages, new this week, and tag breakdown."""
     base_query = {}
     if organizationId:
         base_query["organizationId"] = organizationId
@@ -1024,9 +1192,9 @@ async def get_contacts_summary(organizationId: Optional[str] = None):
         "tagsBreakdown": tags_summary
     }
 
-@api_router.get("/reports/activity")
+@api_router.get("/reports/activity", tags=["Reports"], summary="Get activity over time")
 async def get_activity(days: int = 30, organizationId: Optional[str] = None):
-    """Get contact creation activity over time"""
+    """Returns daily contact and event creation counts for the specified number of days (default 30)."""
     base_query = {}
     if organizationId:
         base_query["organizationId"] = organizationId
@@ -1075,6 +1243,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RateLimitMiddleware)
 
 logging.basicConfig(
     level=logging.INFO,

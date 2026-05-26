@@ -11,8 +11,8 @@ Sempre que um novo agente (AI) for iniciar a execução deste projeto, ele deve:
 
 ---
 
-## Estado Atual: Fase 2.4 Completa
-## Próximo Item: Fase 3.1 - Múltiplas Organizações
+## Estado Atual: Fase 3.4 Completa
+## Próximo Item: Fase 4.1 - Integração com CRM
 
 ---
 
@@ -127,21 +127,38 @@ async def import_device_groups(groups: List[dict]):
 - Autenticação: JWT com `python-jose`
 - Middleware: `get_current_user()`
 
-#### 3.3 Relatórios de Atividade
-- Dashboard com métricas
-- Gráficos de atividade
+#### 3.3 Relatórios de Atividade ✅
+- Dashboard com métricas ✅
+- Gráficos de atividade (PieChart, BarChart, LineChart) ✅
 
 **Backend:**
-- Endpoint: `GET /api/reports/activity`
-- Endpoint: `GET /api/reports/contacts-summary`
+- `GET /api/reports/contacts-summary` (totalContacts, totalFavorites, totalGroups, totalEvents, pendingMessages, totalScheduledMessages, newContactsThisWeek, tagsBreakdown) ✅
+- `GET /api/reports/activity?days=N` (daily contact/event counts com periodDays) ✅
 
 **Frontend:**
-- Tela de relatórios com gráficos (react-native-chart-kit)
+- `app/(tabs)/reports.tsx` — dashboard com cards de resumo, PieChart por tag, BarChart últimos 7 dias, LineChart 30 dias ✅
+- Aba Reports em `app/(tabs)/_layout.tsx` (ícone bar-chart) ✅
+- Filtro `organizationId` em ambas as queries ✅
+- Dependência: `react-native-chart-kit`, `react-native-svg` ✅
 
-#### 3.4 API Externa
-- Documentação OpenAPI aprimorada
-- Rate limiting
-- API Keys para integrações
+#### 3.4 API Externa ✅
+- Documentação OpenAPI aprimorada (tags, summaries, title, description, contact) ✅
+- Rate limiting (120 req/min por cliente, middleware Starlette) ✅
+- API Keys para integrações (modelo + CRUD + toggle + auth via X-API-Key) ✅
+
+**Backend:**
+- Modelo `ApiKeyCreate`, `ApiKeyResponse` (Pydantic) ✅
+- Geração de chave: `wco_` prefix + 32 bytes `secrets.token_urlsafe` ✅
+- Hash SHA256 armazenado (chave mostrada 1x na criação) ✅
+- CRUD: `POST/GET/DELETE /api/api-keys`, `POST /api/api-keys/{id}/toggle` ✅
+- Autenticação alternativa via `X-API-Key` header (dependência `get_api_key_user`) ✅
+- `RateLimiter` class com sliding window + `RateLimitMiddleware` via `BaseHTTPMiddleware` ✅
+- OpenAPI tags em todas as 30+ rotas + metadata do app ✅
+
+**Frontend:**
+- `app/api-keys.tsx` — CRUD visual de API Keys ✅
+- Rota api-keys registrada em `_layout.tsx` ✅
+- Criação com nome + escopos, exibição única da chave, ativar/desativar, excluir ✅
 
 ---
 
@@ -231,6 +248,6 @@ EXPO_PUBLIC_BACKEND_URL=http://localhost:8000
 | 2.4 | Busca Avançada | ✅ Completo | 25/05/2026 |
 | 3.1 | Múltiplas Organizações | ✅ Completo | 25/05/2026 |
 | 3.2 | Permissões de Usuário | ✅ Completo | 25/05/2026 |
-| 3.3 | Relatórios de Atividade | ❌ Pendente | - |
-| 3.4 | API Externa | ❌ Pendente | - |
+| 3.3 | Relatórios de Atividade | ✅ Completo | 26/05/2026 |
+| 3.4 | API Externa | ✅ Completo | 26/05/2026 |
 | 4.x | Integrações Avançadas | ❌ Pendente | - |

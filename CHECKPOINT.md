@@ -1,8 +1,8 @@
 # CHECKPOINT - WhatsApp Contact Organizer
 
-## Data: 25/05/2026
-## Última ação concluída: Múltiplas Organizações (Fase 3.1)
-## Status: ✅ FASE 3.1 COMPLETA
+## Data: 26/05/2026
+## Última ação concluída: API Externa (Fase 3.4)
+## Status: ✅ FASE 3.4 COMPLETA
 
 ---
 
@@ -108,8 +108,8 @@
 
 ### 3.1 Múltiplas Organizações ✅
 ### 3.2 Permissões de Usuário ✅
-### 3.3 Relatórios de Atividade ❌
-### 3.4 API Externa para Integrações ❌
+### 3.3 Relatórios de Atividade ✅
+### 3.4 API Externa para Integrações ✅
 
 ---
 
@@ -146,7 +146,7 @@ APP WHATS/
 │           ├── search.tsx         # Busca avançada com filtros ✅
 │           ├── organizations.tsx  # Gerenciamento de organizações ✅
 │           └── (tabs)/
-│               ├── _layout.tsx      # Tab navigator (4 abas)
+│               ├── _layout.tsx    # Tab navigator (5 abas)
 │               ├── contacts.tsx     # Contatos + backup
 │               ├── events.tsx       # Eventos e aniversários
 │               ├── groups.tsx       # Grupos + agendar + importar
@@ -160,9 +160,10 @@ APP WHATS/
 
 Para continuar, execute na ordem:
 
-1. **Fase 3.3** - Relatórios de Atividade (dashboard + gráficos)
-2. **Fase 3.4** - API Externa (rate limiting, API Keys)
-3. **Fase 4** - Integrações Avançadas
+1. **Fase 4.1** - Integração com CRM (HubSpot/Salesforce sync)
+2. **Fase 4.2** - Webhook para Eventos
+3. **Fase 4.3** - Plugin WhatsApp Business API
+4. **Fase 4.4** - Exportação Completa (CSV/Excel)
 
 ## ✅ Fase 2.3 — Modo Offline com Cache Local (25/05/2026)
 
@@ -287,6 +288,99 @@ Para continuar, execute na ordem:
 | `app/frontend/services/api.ts` | +setAuthToken/getAuthToken |
 | `app/frontend/app/_layout.tsx` | AuthProvider + rota auth |
 | `app/frontend/app/index.tsx` | Redireciona para /auth se não logado |
+
+## ✅ Fase 3.3 — Relatórios de Atividade (26/05/2026)
+
+### O que foi feito
+
+**Backend (`server.py`):**
+
+1. **`GET /api/reports/contacts-summary`** — Retorna:
+   - `totalContacts` — contagem total de contatos
+   - `totalFavorites` — contatos favoritados
+   - `totalGroups` — total de grupos
+   - `totalEvents` — total de eventos
+   - `pendingMessages` — mensagens agendadas pendentes
+   - `totalScheduledMessages` — total de mensagens agendadas
+   - `newContactsThisWeek` — contatos criados nos últimos 7 dias
+   - `tagsBreakdown` — array de `{tag, count}` com distribuição de tags
+   - Filtro opcional: `organizationId`
+
+2. **`GET /api/reports/activity?days=30`** — Retorna:
+   - `daily` — array de `{date, count}` com agregação de contatos por dia
+   - `events` — array de `{date, count}` com agregação de eventos por dia
+   - `periodDays` — número de dias consultados
+   - Filtro opcional: `organizationId`
+
+**Frontend — `app/(tabs)/reports.tsx`:**
+
+1. **Cards de resumo** — grid 3 colunas com ícone + valor + label (Contatos, Favoritos, Grupos, Eventos, Novos/7d, Pendentes)
+2. **PieChart** (Contatos por Tag) — gráfico de pizza com distribuição de tags (top 7)
+3. **BarChart** (Contatos por Dia) — últimos 7 dias em barras verticais
+4. **LineChart** (Atividade 30 dias) — linha suave (bezier) com evolução diária
+5. **Estado vazio** — mensagem "Nenhum dado disponível" quando não há contatos
+6. **Banner offline** — azul "Dados offline" quando dados vêm do cache
+7. **Filtro `organizationId`** — passado automaticamente via `useOrganization`
+8. **Loading** — spinner centralizado durante o fetch
+
+**Arquivos criados/modificados:**
+
+| Arquivo | Mudança |
+|---------|---------|
+| `app/backend/server.py` | +2 endpoints de relatórios |
+| `app/frontend/app/(tabs)/reports.tsx` | **Novo** — tela completa com 4 gráficos |
+| `app/frontend/app/(tabs)/_layout.tsx` | +aba Reports (ícone bar-chart) |
+| `app/frontend/package.json` | +react-native-chart-kit, react-native-svg |
+
+## ✅ Fase 3.4 — API Externa (26/05/2026)
+
+### O que foi feito
+
+**Backend (`server.py`):**
+
+1. **Documentação OpenAPI aprimorada:**
+   - `title`, `description`, `version`, `contact` no `FastAPI()` constructor
+   - `openapi_tags` com 9 grupos (Auth, Contacts, Groups, Events, Scheduled Messages, Organizations, API Keys, Reports, Backup & Export)
+   - `tags` e `summary` em todas as 30+ rotas
+   - Descrições detalhadas em cada endpoint
+
+2. **Rate limiting (120 req/min por cliente):**
+   - `RateLimiter` class com sliding window time-based (`collections.deque`)
+   - `RateLimitMiddleware` via `BaseHTTPMiddleware` da Starlette
+   - Diferenciação por IP, API Key prefix, ou JWT
+   - Exceção HTTP 429 quando limite excedido
+   - Isenta `/docs`, `/openapi.json`, `/redoc` do rate limit
+
+3. **API Keys para integrações:**
+   - Geração: `wco_` + 32 bytes `secrets.token_urlsafe()` (URL-safe base64)
+   - Armazenamento: hash SHA256 da chave (nunca a chave bruta)
+   - Modelos: `ApiKeyCreate` (name, scopes), `ApiKeyResponse` (id, name, key 1x, scopes, isActive)
+   - `api_key_helper()` — formata documento MongoDB para resposta
+   - CRUD endpoints (admin only):
+     - `POST /api/api-keys` — cria chave, retorna a chave 1 única vez
+     - `GET /api/api-keys` — lista chaves (sem os valores)
+     - `DELETE /api/api-keys/{id}` — remove chave
+     - `POST /api/api-keys/{id}/toggle` — ativa/desativa sem excluir
+   - Autenticação alternativa: `get_api_key_user()` dependency via `X-API-Key` header
+   - `get_current_user_or_api_key()` — aceita JWT ou API Key
+   - `lastUsedAt` atualizado automaticamente a cada uso
+
+**Frontend — `app/api-keys.tsx`:**
+
+1. **Listagem de chaves** — cards com nome, status (ativa/inativa), escopos, datas
+2. **Criação** — formulário com nome e escopos (separados por vírgula)
+3. **Exibição única** — banner amarelo com a chave em monospace após criação, instrução para copiar
+4. **Ativar/Desativar** — toggle sem excluir
+5. **Excluir** — confirmação antes de remover
+6. **Estado vazio** — mensagem "Nenhuma API Key" com ícone
+
+**Arquivos criados/modificados:**
+
+| Arquivo | Mudança |
+|---------|---------|
+| `app/backend/server.py` | +imports (secrets, hashlib, time, deque, defaultdict, APIKeyHeader, BaseHTTPMiddleware) + RateLimiter + RateLimitMiddleware + APIKey models + api_key_helper + hash_api_key/generate_api_key + get_api_key_user + CRUD API keys + tags/summaries em 30+ rotas + OpenAPI metadata |
+| `app/frontend/app/api-keys.tsx` | **Novo** — tela de gerenciamento de API Keys |
+| `app/frontend/app/_layout.tsx` | +rota `api-keys` como modal |
 
 ## ✅ Fase 2.4 — Busca Avançada com Filtros (25/05/2026)
 
@@ -413,7 +507,8 @@ APP WHATS/
 │               ├── contacts.tsx   # + cache offline ✅
 │               ├── events.tsx     # + cache offline ✅
 │               ├── groups.tsx     # + cache offline ✅
-│               └── tags.tsx       # + cache offline ✅
+│               ├── tags.tsx       # + cache offline ✅
+│               └── reports.tsx    # Dashboard com gráficos ✅
 ├── package.json
 ├── AGENTS.md
 └── CHECKPOINT.md

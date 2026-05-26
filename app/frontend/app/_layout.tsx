@@ -130,6 +130,16 @@ function RootLayoutInner() {
             headerShown: false
           }} 
         />
+        <Stack.Screen 
+          name="api-keys" 
+          options={{ 
+            presentation: 'modal',
+            headerShown: true,
+            headerStyle: { backgroundColor: colors.headerBg },
+            headerTintColor: colors.headerTint,
+            title: 'API Keys'
+          }} 
+        />
       </Stack>
     </>
   );
