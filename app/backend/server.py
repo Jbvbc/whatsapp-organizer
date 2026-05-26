@@ -49,6 +49,7 @@ app = FastAPI(
         {"name": "API Keys", "description": "API key management for integrations (admin only)"},
         {"name": "Reports", "description": "Dashboard statistics and activity reports"},
         {"name": "Backup & Export", "description": "Backup, restore, and data export"},
+        {"name": "CRM", "description": "CRM integration (HubSpot, Salesforce) for contact sync"},
     ],
 )
 api_router = APIRouter(prefix="/api")
@@ -364,6 +365,36 @@ class ApiKeyResponse(BaseModel):
     lastUsedAt: Optional[datetime] = None
     createdAt: datetime
 
+class CrmIntegrationCreate(BaseModel):
+    provider: str = Field(description="CRM provider (hubspot, salesforce)")
+    name: str = Field(description="Friendly name for this integration")
+    apiKey: str = Field(description="API key/token for the CRM")
+    apiUrl: Optional[str] = Field(None, description="Custom API URL if applicable")
+    organizationId: Optional[str] = None
+
+class CrmIntegrationUpdate(BaseModel):
+    name: Optional[str] = None
+    apiKey: Optional[str] = None
+    apiUrl: Optional[str] = None
+    isActive: Optional[bool] = None
+
+class CrmIntegrationResponse(BaseModel):
+    id: str
+    provider: str
+    name: str
+    apiUrl: Optional[str] = None
+    isActive: bool
+    lastSyncAt: Optional[datetime] = None
+    lastSyncStatus: Optional[str] = None
+    organizationId: Optional[str] = None
+    createdAt: datetime
+    updatedAt: datetime
+
+class CrmProviderInfo(BaseModel):
+    id: str
+    name: str
+    description: str
+
 # Helper function to convert ObjectId to string
 def contact_helper(contact) -> dict:
     return {
@@ -423,6 +454,20 @@ def api_key_helper(doc) -> dict:
         "isActive": doc.get("isActive", True),
         "lastUsedAt": doc.get("lastUsedAt"),
         "createdAt": doc["createdAt"]
+    }
+
+def crm_integration_helper(doc) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "provider": doc["provider"],
+        "name": doc["name"],
+        "apiUrl": doc.get("apiUrl"),
+        "isActive": doc.get("isActive", True),
+        "lastSyncAt": doc.get("lastSyncAt"),
+        "lastSyncStatus": doc.get("lastSyncStatus"),
+        "organizationId": doc.get("organizationId"),
+        "createdAt": doc["createdAt"],
+        "updatedAt": doc["updatedAt"]
     }
 
 def event_helper(event) -> dict:
@@ -722,6 +767,247 @@ async def toggle_api_key(key_id: str, user: dict = Depends(get_current_user)):
     new_status = not doc.get("isActive", True)
     await db.api_keys.update_one({"_id": ObjectId(key_id)}, {"$set": {"isActive": new_status}})
     return {"id": key_id, "isActive": new_status}
+
+# ─── CRM Integration ────────────────────────────────────
+CRM_PROVIDERS = {
+    "hubspot": {
+        "name": "HubSpot",
+        "description": "HubSpot CRM - bidirectional contact sync",
+        "default_url": "https://api.hubapi.com",
+    },
+    "salesforce": {
+        "name": "Salesforce",
+        "description": "Salesforce CRM - bidirectional contact sync",
+        "default_url": "https://your-instance.salesforce.com",
+    },
+}
+
+@api_router.get("/crm/providers", tags=["CRM"], summary="List available CRM providers")
+async def list_crm_providers():
+    """Returns a list of supported CRM providers (HubSpot, Salesforce) with metadata."""
+    return [
+        CrmProviderInfo(id=pid, name=p["name"], description=p["description"])
+        for pid, p in CRM_PROVIDERS.items()
+    ]
+
+@api_router.post("/crm/integrations", tags=["CRM"], summary="Create a CRM integration")
+async def create_crm_integration(integration: CrmIntegrationCreate, user: dict = Depends(get_current_user_or_api_key)):
+    """Configure a new CRM integration with API credentials."""
+    if integration.provider not in CRM_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported CRM provider. Supported: {', '.join(CRM_PROVIDERS.keys())}")
+    
+    provider = CRM_PROVIDERS[integration.provider]
+    doc = {
+        "provider": integration.provider,
+        "name": integration.name or provider["name"],
+        "apiKey": integration.apiKey,
+        "apiUrl": integration.apiUrl or provider["default_url"],
+        "organizationId": integration.organizationId,
+        "userId": user["id"],
+        "isActive": True,
+        "lastSyncAt": None,
+        "lastSyncStatus": None,
+        "createdAt": datetime.utcnow(),
+        "updatedAt": datetime.utcnow()
+    }
+    result = await db.crm_integrations.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return crm_integration_helper(doc)
+
+@api_router.get("/crm/integrations", tags=["CRM"], summary="List CRM integrations")
+async def list_crm_integrations(user: dict = Depends(get_current_user_or_api_key)):
+    """Returns all configured CRM integrations for the current user."""
+    docs = await db.crm_integrations.find({"userId": user["id"]}).sort("createdAt", -1).to_list(50)
+    return [crm_integration_helper(d) for d in docs]
+
+@api_router.put("/crm/integrations/{integration_id}", tags=["CRM"], summary="Update a CRM integration")
+async def update_crm_integration(integration_id: str, update: CrmIntegrationUpdate, user: dict = Depends(get_current_user_or_api_key)):
+    """Update CRM integration credentials or settings."""
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    update_data["updatedAt"] = datetime.utcnow()
+    result = await db.crm_integrations.update_one(
+        {"_id": ObjectId(integration_id), "userId": user["id"]},
+        {"$set": update_data}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="CRM integration not found")
+    doc = await db.crm_integrations.find_one({"_id": ObjectId(integration_id)})
+    return crm_integration_helper(doc)
+
+@api_router.delete("/crm/integrations/{integration_id}", tags=["CRM"], summary="Delete a CRM integration")
+async def delete_crm_integration(integration_id: str, user: dict = Depends(get_current_user_or_api_key)):
+    """Remove a CRM integration configuration."""
+    result = await db.crm_integrations.delete_one({"_id": ObjectId(integration_id), "userId": user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="CRM integration not found")
+    return {"message": "CRM integration deleted successfully"}
+
+async def hubspot_sync_contacts(api_key: str, api_url: str, organization_id: Optional[str] = None) -> dict:
+    """Sync contacts with HubSpot CRM"""
+    import httpx
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    synced = 0
+    errors = 0
+    
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Pull contacts from HubSpot (paginated)
+        after = None
+        hubspot_contacts = []
+        for _ in range(5):  # Max 5 pages
+            params: dict = {"limit": 100}
+            if after:
+                params["after"] = after
+            try:
+                resp = await client.get(f"{api_url}/crm/v3/objects/contacts", headers=headers, params=params)
+                if resp.status_code != 200:
+                    errors += 1
+                    break
+                data = resp.json()
+                for result in data.get("results", []):
+                    props = result.get("properties", {})
+                    hubspot_contacts.append({
+                        "id": result["id"],
+                        "name": f"{props.get('firstname', '')} {props.get('lastname', '')}".strip(),
+                        "phone": props.get("phone", ""),
+                        "email": props.get("email", ""),
+                    })
+                after = data.get("paging", {}).get("next", {}).get("after")
+                if not after:
+                    break
+            except Exception:
+                errors += 1
+                break
+        
+        # Push local contacts to HubSpot
+        query = {}
+        if organization_id:
+            query["organizationId"] = organization_id
+        local_contacts = await db.contacts.find(query).to_list(500)
+        
+        for contact in local_contacts:
+            try:
+                # Check if contact exists in HubSpot by phone
+                search_resp = await client.post(
+                    f"{api_url}/crm/v3/objects/contacts/search",
+                    headers=headers,
+                    json={
+                        "filterGroups": [{
+                            "filters": [{"propertyName": "phone", "operator": "EQ", "value": contact["phone"]}]
+                        }]
+                    }
+                )
+                exists = search_resp.status_code == 200 and len(search_resp.json().get("results", [])) > 0
+                
+                properties = {
+                    "firstname": contact["name"].split(" ")[0] if contact["name"] else "",
+                    "lastname": " ".join(contact["name"].split(" ")[1:]) if " " in contact["name"] else "",
+                    "phone": contact["phone"],
+                }
+                
+                if exists:
+                    hubspot_id = search_resp.json()["results"][0]["id"]
+                    await client.patch(
+                        f"{api_url}/crm/v3/objects/contacts/{hubspot_id}",
+                        headers=headers,
+                        json={"properties": properties}
+                    )
+                else:
+                    await client.post(
+                        f"{api_url}/crm/v3/objects/contacts",
+                        headers=headers,
+                        json={"properties": properties}
+                    )
+                synced += 1
+            except Exception:
+                errors += 1
+    
+    return {"synced": synced, "errors": errors, "pulled": len(hubspot_contacts)}
+
+async def salesforce_sync_contacts(api_key: str, api_url: str, organization_id: Optional[str] = None) -> dict:
+    """Sync contacts with Salesforce CRM"""
+    import httpx
+    # Salesforce uses OAuth2 - the api_key here is the session token
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    synced = 0
+    errors = 0
+    
+    async with httpx.AsyncClient(timeout=30) as client:
+        query = {}
+        if organization_id:
+            query["organizationId"] = organization_id
+        local_contacts = await db.contacts.find(query).to_list(500)
+        
+        for contact in local_contacts:
+            try:
+                # Query Salesforce for existing contact by phone
+                phone_clean = contact["phone"].replace(" ", "")
+                search_resp = await client.get(
+                    f"{api_url}/services/data/v58.0/query",
+                    headers=headers,
+                    params={"q": f"SELECT Id, Name, Phone FROM Contact WHERE Phone = '{phone_clean}'"}
+                )
+                exists = search_resp.status_code == 200 and len(search_resp.json().get("records", [])) > 0
+                
+                contact_data = {
+                    "LastName": contact["name"] if contact["name"] else "Unknown",
+                    "Phone": contact["phone"],
+                }
+                
+                if exists:
+                    sf_id = search_resp.json()["records"][0]["Id"]
+                    await client.patch(
+                        f"{api_url}/services/data/v58.0/sobjects/Contact/{sf_id}",
+                        headers=headers,
+                        json=contact_data
+                    )
+                else:
+                    await client.post(
+                        f"{api_url}/services/data/v58.0/sobjects/Contact",
+                        headers=headers,
+                        json=contact_data
+                    )
+                synced += 1
+            except Exception:
+                errors += 1
+    
+    return {"synced": synced, "errors": errors, "pulled": 0}
+
+@api_router.post("/crm/integrations/{integration_id}/sync", tags=["CRM"], summary="Sync contacts with CRM")
+async def sync_crm_contacts(integration_id: str, user: dict = Depends(get_current_user_or_api_key)):
+    """Trigger a bidirectional contact sync with the configured CRM."""
+    doc = await db.crm_integrations.find_one({"_id": ObjectId(integration_id), "userId": user["id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="CRM integration not found")
+    if not doc.get("isActive"):
+        raise HTTPException(status_code=400, detail="CRM integration is disabled")
+    
+    provider = doc["provider"]
+    api_key = doc.get("apiKey", "")
+    api_url = doc.get("apiUrl", CRM_PROVIDERS.get(provider, {}).get("default_url", ""))
+    org_id = doc.get("organizationId")
+    
+    try:
+        if provider == "hubspot":
+            result = await hubspot_sync_contacts(api_key, api_url, org_id)
+        elif provider == "salesforce":
+            result = await salesforce_sync_contacts(api_key, api_url, org_id)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+        
+        status = "success" if result["errors"] == 0 else "partial"
+        await db.crm_integrations.update_one(
+            {"_id": ObjectId(integration_id)},
+            {"$set": {"lastSyncAt": datetime.utcnow(), "lastSyncStatus": status, "updatedAt": datetime.utcnow()}}
+        )
+        return {"provider": provider, "status": status, **result}
+    except Exception as e:
+        await db.crm_integrations.update_one(
+            {"_id": ObjectId(integration_id)},
+            {"$set": {"lastSyncAt": datetime.utcnow(), "lastSyncStatus": "failed", "updatedAt": datetime.utcnow()}}
+        )
+        raise HTTPException(status_code=500, detail=f"CRM sync failed: {str(e)}")
 
 # Include router
 app.include_router(api_router)

@@ -25,28 +25,28 @@ export default function TabLayout() {
         },
         headerTintColor: colors.headerTint,
         headerRight: () => (
-          <TouchableOpacity
-            onPress={() => router.push('/organizations')}
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              marginRight: 12,
-              gap: 4,
-            }}
-          >
-            <View
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: 5,
-                backgroundColor: selectedOrg?.color || colors.textTertiary,
-              }}
-            />
-            <Text style={{ color: colors.headerTint, fontSize: 13, fontWeight: '500' }}>
-              {selectedOrg?.name || 'Sem org'}
-            </Text>
-            <Ionicons name="chevron-down" size={14} color={colors.headerTint} />
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginRight: 12, gap: 8 }}>
+            <TouchableOpacity onPress={() => router.push('/crm')}>
+              <Ionicons name="cloud" size={20} color={colors.headerTint} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => router.push('/organizations')}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+            >
+              <View
+                style={{
+                  width: 10,
+                  height: 10,
+                  borderRadius: 5,
+                  backgroundColor: selectedOrg?.color || colors.textTertiary,
+                }}
+              />
+              <Text style={{ color: colors.headerTint, fontSize: 13, fontWeight: '500' }}>
+                {selectedOrg?.name || 'Sem org'}
+              </Text>
+              <Ionicons name="chevron-down" size={14} color={colors.headerTint} />
+            </TouchableOpacity>
+          </View>
         ),
       }}
     >

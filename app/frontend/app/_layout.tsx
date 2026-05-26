@@ -140,6 +140,16 @@ function RootLayoutInner() {
             title: 'API Keys'
           }} 
         />
+        <Stack.Screen 
+          name="crm" 
+          options={{ 
+            presentation: 'modal',
+            headerShown: true,
+            headerStyle: { backgroundColor: colors.headerBg },
+            headerTintColor: colors.headerTint,
+            title: 'Integração CRM'
+          }} 
+        />
       </Stack>
     </>
   );
