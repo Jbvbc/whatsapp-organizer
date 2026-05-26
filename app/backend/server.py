@@ -50,6 +50,7 @@ app = FastAPI(
         {"name": "Reports", "description": "Dashboard statistics and activity reports"},
         {"name": "Backup & Export", "description": "Backup, restore, and data export"},
         {"name": "CRM", "description": "CRM integration (HubSpot, Salesforce) for contact sync"},
+        {"name": "Webhooks", "description": "Webhook configuration for event-driven integrations"},
     ],
 )
 api_router = APIRouter(prefix="/api")
@@ -395,6 +396,30 @@ class CrmProviderInfo(BaseModel):
     name: str
     description: str
 
+class WebhookCreate(BaseModel):
+    url: str = Field(description="URL to send webhook POST requests to")
+    events: List[str] = Field(description="Events to subscribe to: contact.created, contact.updated, message.scheduled, message.sent, event.created, event.upcoming")
+    name: Optional[str] = Field(None, description="Friendly name")
+    secret: Optional[str] = Field(None, description="Secret for HMAC signature (optional)")
+
+class WebhookUpdate(BaseModel):
+    url: Optional[str] = None
+    events: Optional[List[str]] = None
+    name: Optional[str] = None
+    secret: Optional[str] = None
+    isActive: Optional[bool] = None
+
+class WebhookResponse(BaseModel):
+    id: str
+    url: str
+    events: List[str]
+    name: Optional[str] = None
+    isActive: bool
+    lastTriggeredAt: Optional[datetime] = None
+    lastResponseStatus: Optional[int] = None
+    createdAt: datetime
+    updatedAt: datetime
+
 # Helper function to convert ObjectId to string
 def contact_helper(contact) -> dict:
     return {
@@ -470,6 +495,56 @@ def crm_integration_helper(doc) -> dict:
         "updatedAt": doc["updatedAt"]
     }
 
+def webhook_helper(doc) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "url": doc["url"],
+        "events": doc.get("events", []),
+        "name": doc.get("name"),
+        "isActive": doc.get("isActive", True),
+        "lastTriggeredAt": doc.get("lastTriggeredAt"),
+        "lastResponseStatus": doc.get("lastResponseStatus"),
+        "createdAt": doc["createdAt"],
+        "updatedAt": doc["updatedAt"]
+    }
+
+async def dispatch_webhook_event(event_type: str, payload: dict):
+    """Fire webhooks subscribed to a given event type"""
+    try:
+        webhooks = await db.webhooks.find({
+            "events": event_type,
+            "isActive": True
+        }).to_list(50)
+    except Exception:
+        return  # Collection might not exist yet
+    
+    for wh in webhooks:
+        asyncio.create_task(send_webhook(wh, event_type, payload))
+
+async def send_webhook(wh: dict, event_type: str, payload: dict):
+    """Send a single webhook POST request"""
+    import httpx
+    url = wh["url"]
+    body = json.dumps({"event": event_type, "data": payload, "timestamp": datetime.utcnow().isoformat()}, default=str)
+    headers = {"Content-Type": "application/json"}
+    secret = wh.get("secret")
+    if secret:
+        import hmac
+        signature = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        headers["X-Webhook-Signature"] = signature
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, content=body, headers=headers)
+        await db.webhooks.update_one(
+            {"_id": wh["_id"]},
+            {"$set": {"lastTriggeredAt": datetime.utcnow(), "lastResponseStatus": resp.status_code, "updatedAt": datetime.utcnow()}}
+        )
+    except Exception as e:
+        await db.webhooks.update_one(
+            {"_id": wh["_id"]},
+            {"$set": {"lastTriggeredAt": datetime.utcnow(), "lastResponseStatus": 0, "updatedAt": datetime.utcnow()}}
+        )
+
 def event_helper(event) -> dict:
     return {
         "id": str(event["_id"]),
@@ -500,6 +575,7 @@ async def sync_contacts(contacts: List[Contact]):
             contact_dict["updatedAt"] = datetime.utcnow()
             await db.contacts.insert_one(contact_dict)
             synced_count += 1
+            await dispatch_webhook_event("contact.created", {"id": str(contact_dict["_id"]), "name": contact.name, "phone": contact.phone, "tags": contact.tags})
     return {"message": f"Synced {synced_count} new contacts", "count": synced_count}
 
 @api_router.get("/contacts", tags=["Contacts"], summary="List all contacts with filters")
@@ -562,6 +638,7 @@ async def update_contact(contact_id: str, update: ContactUpdate):
             raise HTTPException(status_code=404, detail="Contact not found")
     
     contact = await db.contacts.find_one({"_id": ObjectId(contact_id)})
+    await dispatch_webhook_event("contact.updated", {"id": contact_id, "name": contact.get("name"), "phone": contact.get("phone"), "changes": list(update_data.keys())})
     return contact_helper(contact)
 
 @api_router.delete("/contacts/{contact_id}", tags=["Contacts"], summary="Delete a contact")
@@ -570,6 +647,7 @@ async def delete_contact(contact_id: str):
     result = await db.contacts.delete_one({"_id": ObjectId(contact_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Contact not found")
+    await dispatch_webhook_event("contact.deleted", {"id": contact_id})
     return {"message": "Contact deleted successfully"}
 
 @api_router.get("/tags", tags=["Contacts"], summary="Get all unique tags")
@@ -1009,10 +1087,76 @@ async def sync_crm_contacts(integration_id: str, user: dict = Depends(get_curren
         )
         raise HTTPException(status_code=500, detail=f"CRM sync failed: {str(e)}")
 
+# ─── Webhook Routes ─────────────────────────────────────
+VALID_WEBHOOK_EVENTS = [
+    "contact.created", "contact.updated", "contact.deleted",
+    "message.scheduled", "message.sent", "message.failed",
+    "event.created", "event.upcoming",
+]
+
+@api_router.get("/webhooks/events", tags=["Webhooks"], summary="List valid webhook event types")
+async def list_webhook_events():
+    """Returns the list of event types that can trigger webhooks."""
+    return {"events": VALID_WEBHOOK_EVENTS}
+
+@api_router.post("/webhooks", tags=["Webhooks"], summary="Create a webhook")
+async def create_webhook(wh: WebhookCreate, user: dict = Depends(get_current_user_or_api_key)):
+    """Register a new webhook URL to receive event notifications."""
+    for event in wh.events:
+        if event not in VALID_WEBHOOK_EVENTS:
+            raise HTTPException(status_code=400, detail=f"Invalid event: {event}. Valid: {', '.join(VALID_WEBHOOK_EVENTS)}")
+    doc = {
+        "url": wh.url,
+        "events": wh.events,
+        "name": wh.name,
+        "secret": wh.secret,
+        "userId": user["id"],
+        "isActive": True,
+        "lastTriggeredAt": None,
+        "lastResponseStatus": None,
+        "createdAt": datetime.utcnow(),
+        "updatedAt": datetime.utcnow()
+    }
+    result = await db.webhooks.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return webhook_helper(doc)
+
+@api_router.get("/webhooks", tags=["Webhooks"], summary="List webhooks")
+async def list_webhooks(user: dict = Depends(get_current_user_or_api_key)):
+    """Returns all registered webhooks for the current user."""
+    docs = await db.webhooks.find({"userId": user["id"]}).sort("createdAt", -1).to_list(50)
+    return [webhook_helper(d) for d in docs]
+
+@api_router.put("/webhooks/{webhook_id}", tags=["Webhooks"], summary="Update a webhook")
+async def update_webhook(webhook_id: str, update: WebhookUpdate, user: dict = Depends(get_current_user_or_api_key)):
+    """Update webhook URL, events, name, or active status."""
+    update_data = {k: v for k, v in update.dict(exclude_none=True).items()}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    if "events" in update_data:
+        for event in update_data["events"]:
+            if event not in VALID_WEBHOOK_EVENTS:
+                raise HTTPException(status_code=400, detail=f"Invalid event: {event}")
+    update_data["updatedAt"] = datetime.utcnow()
+    result = await db.webhooks.update_one(
+        {"_id": ObjectId(webhook_id), "userId": user["id"]},
+        {"$set": update_data}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    doc = await db.webhooks.find_one({"_id": ObjectId(webhook_id)})
+    return webhook_helper(doc)
+
+@api_router.delete("/webhooks/{webhook_id}", tags=["Webhooks"], summary="Delete a webhook")
+async def delete_webhook(webhook_id: str, user: dict = Depends(get_current_user_or_api_key)):
+    """Remove a webhook."""
+    result = await db.webhooks.delete_one({"_id": ObjectId(webhook_id), "userId": user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"message": "Webhook deleted successfully"}
+
 # Include router
 app.include_router(api_router)
-
-# Scheduled Message Routes
 @api_router.post("/scheduled-messages", tags=["Scheduled Messages"], summary="Create a scheduled message")
 async def create_scheduled_message(scheduled_message: ScheduledMessage):
     """Schedule a message to be sent to a group at a specific time. Supports recurring patterns (daily, weekly, monthly)."""
@@ -1021,6 +1165,7 @@ async def create_scheduled_message(scheduled_message: ScheduledMessage):
     scheduled_message_dict["updatedAt"] = datetime.utcnow()
     result = await db.scheduled_messages.insert_one(scheduled_message_dict)
     scheduled_message_dict["_id"] = result.inserted_id
+    await dispatch_webhook_event("message.scheduled", {"id": str(result.inserted_id), "groupId": scheduled_message.groupId, "scheduledTime": scheduled_message.scheduledTime.isoformat(), "status": "pending"})
     return scheduled_message_helper(scheduled_message_dict)
 
 @api_router.get("/scheduled-messages", tags=["Scheduled Messages"], summary="List scheduled messages")
@@ -1093,12 +1238,14 @@ async def send_scheduled_message(message_id: str):
             {"$set": {"status": "sent", "updatedAt": datetime.utcnow()}}
         )
         
+        await dispatch_webhook_event("message.sent", {"id": message_id, "groupId": scheduled_message.get("groupId"), "status": "sent"})
         return {"message": "Message sent successfully"}
     except Exception as e:
         await db.scheduled_messages.update_one(
             {"_id": ObjectId(message_id)},
             {"$set": {"status": "failed", "updatedAt": datetime.utcnow()}}
         )
+        await dispatch_webhook_event("message.failed", {"id": message_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 def send_whatsapp_message(group: dict, message: str):
@@ -1255,6 +1402,7 @@ async def create_event(event: Event):
     event_dict["updatedAt"] = datetime.utcnow()
     result = await db.events.insert_one(event_dict)
     event_dict["_id"] = result.inserted_id
+    await dispatch_webhook_event("event.created", {"id": str(result.inserted_id), "title": event.title, "type": event.type, "date": event.date.isoformat() if event.date else None})
     return event_helper(event_dict)
 
 @api_router.get("/events", tags=["Events"], summary="List all events with filters")
@@ -1382,8 +1530,10 @@ async def check_birthdays():
                         "updatedAt": datetime.utcnow()
                     }
                     
-                    await db.events.insert_one(birthday_event)
+                    result = await db.events.insert_one(birthday_event)
+                    birthday_event["_id"] = result.inserted_id
                     birthday_count += 1
+                    await dispatch_webhook_event("event.created", {"id": str(result.inserted_id), "title": birthday_event["title"], "type": "birthday", "date": birthday_event["date"].isoformat()})
         
         return {"message": f"Created {birthday_count} birthday events"}
         

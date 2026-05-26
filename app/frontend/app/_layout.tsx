@@ -150,6 +150,16 @@ function RootLayoutInner() {
             title: 'Integração CRM'
           }} 
         />
+        <Stack.Screen 
+          name="webhooks" 
+          options={{ 
+            presentation: 'modal',
+            headerShown: true,
+            headerStyle: { backgroundColor: colors.headerBg },
+            headerTintColor: colors.headerTint,
+            title: 'Webhooks'
+          }} 
+        />
       </Stack>
     </>
   );

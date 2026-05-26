@@ -1,8 +1,8 @@
 # CHECKPOINT - WhatsApp Contact Organizer
 
 ## Data: 26/05/2026
-## Última ação concluída: API Externa (Fase 3.4)
-## Status: ✅ FASE 3.4 COMPLETA
+## Última ação concluída: CRM Integration (Fase 4.1)
+## Status: ✅ FASE 4.1 COMPLETA
 
 ---
 
@@ -115,7 +115,7 @@
 
 ## 🔄 FASE 4 - PENDENTE (Integrações Avançadas)
 
-### 4.1 Integração com CRM ❌
+### 4.1 Integração com CRM ✅
 ### 4.2 Webhook para Eventos ❌
 ### 4.3 Plugin para WhatsApp Business API ❌
 ### 4.4 Exportação para CSV/Excel (parcial - contatos OK, grupos OK) ❌
@@ -160,8 +160,9 @@ APP WHATS/
 
 Para continuar, execute na ordem:
 
-1. **Fase 4.1** - Integração com CRM (HubSpot/Salesforce sync)
-2. **Fase 4.2** - Webhook para Eventos
+1. **Fase 4.2** - Webhook para Eventos
+2. **Fase 4.3** - Plugin WhatsApp Business API
+3. **Fase 4.4** - Exportação Completa (CSV/Excel)
 3. **Fase 4.3** - Plugin WhatsApp Business API
 4. **Fase 4.4** - Exportação Completa (CSV/Excel)
 
@@ -331,6 +332,58 @@ Para continuar, execute na ordem:
 | `app/frontend/app/(tabs)/reports.tsx` | **Novo** — tela completa com 4 gráficos |
 | `app/frontend/app/(tabs)/_layout.tsx` | +aba Reports (ícone bar-chart) |
 | `app/frontend/package.json` | +react-native-chart-kit, react-native-svg |
+
+## ✅ Fase 4.1 — Integração com CRM (26/05/2026)
+
+### O que foi feito
+
+**Backend (`server.py`):**
+
+1. **Modelo `CrmIntegration`** — campos: provider, name, apiKey, apiUrl, userId, organizationId, isActive, lastSyncAt, lastSyncStatus
+2. **Modelos Pydantic:**
+   - `CrmIntegrationCreate` (provider, name, apiKey, apiUrl, organizationId)
+   - `CrmIntegrationUpdate` (name, apiKey, apiUrl, isActive)
+   - `CrmIntegrationResponse` (id, provider, name, isActive, lastSyncAt, lastSyncStatus, timestamps)
+   - `CrmProviderInfo` (id, name, description)
+3. **Helpers:** `crm_integration_helper()` — formata doc MongoDB para response
+4. **CRUD endpoints:**
+   - `GET /api/crm/providers` — lista provedores suportados (HubSpot, Salesforce)
+   - `POST /api/crm/integrations` — cria nova integração
+   - `GET /api/crm/integrations` — lista integrações do usuário
+   - `PUT /api/crm/integrations/{id}` — atualiza credenciais/config
+   - `DELETE /api/crm/integrations/{id}` — remove integração
+5. **Sync endpoints:**
+   - `POST /api/crm/integrations/{id}/sync` — dispara sync bidirecional
+   - Atualiza `lastSyncAt` + `lastSyncStatus` (success/partial/failed)
+6. **HubSpot sync (`hubspot_sync_contacts()`):**
+   - Pull: GET `/crm/v3/objects/contacts` com paginação (100 por página, max 5 páginas)
+   - Push: POST `/crm/v3/objects/contacts/search` (verifica existência por telefone)
+   - Create ou Update (PATCH) conforme existência
+7. **Salesforce sync (`salesforce_sync_contacts()`):**
+   - Push: SOQL query `SELECT Id FROM Contact WHERE Phone = '...'`
+   - Create (POST) ou Update (PATCH) via REST API v58.0
+8. **Dependência:** `httpx>=0.27` em `requirements.txt`
+
+**Frontend — `app/crm.tsx`:**
+
+1. **Seletor de provedor** — chips HubSpot (laranja) / Salesforce (azul)
+2. **Formulário** — nome, API Key (secure text), URL opcional
+3. **Listagem de integrações** — cards com status (ativo/inativo), último sync, resultado
+4. **Botão sincronizar** — dispara sync com loading + alerta com resultado
+5. **Ativar/Desativar** — toggle via PUT
+6. **Excluir** — confirmação antes de remover
+7. **Estado vazio** — ícone cloud-offline + instrução
+8. **Acesso:** ícone cloud no header do tab navigator → `/crm`
+
+**Arquivos criados/modificados:**
+
+| Arquivo | Mudança |
+|---------|---------|
+| `app/backend/server.py` | +modelos CRM + helpers + CRUD + sync logic (HubSpot + Salesforce) |
+| `app/backend/requirements.txt` | +httpx>=0.27 |
+| `app/frontend/app/crm.tsx` | **Novo** — tela de integração CRM |
+| `app/frontend/app/_layout.tsx` | +rota crm como modal |
+| `app/frontend/app/(tabs)/_layout.tsx` | +ícone cloud no header → /crm |
 
 ## ✅ Fase 3.4 — API Externa (26/05/2026)
 
@@ -502,6 +555,8 @@ APP WHATS/
 │           ├── import-groups.tsx  # (offline-aware ✅)
 │           ├── search.tsx         # Busca avançada com filtros ✅
 │           ├── organizations.tsx  # Gerenciamento de organizações ✅
+│           ├── api-keys.tsx       # Gerenciamento de API Keys ✅
+│           ├── crm.tsx            # Integração CRM ✅
 │           └── (tabs)/
 │               ├── _layout.tsx    # Tema dinâmico ✅
 │               ├── contacts.tsx   # + cache offline ✅

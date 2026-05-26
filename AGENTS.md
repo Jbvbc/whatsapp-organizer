@@ -11,8 +11,8 @@ Sempre que um novo agente (AI) for iniciar a execução deste projeto, ele deve:
 
 ---
 
-## Estado Atual: Fase 3.4 Completa
-## Próximo Item: Fase 4.1 - Integração com CRM
+## Estado Atual: Fase 4.1 Completa
+## Próximo Item: Fase 4.2 - Webhook para Eventos
 
 ---
 
@@ -164,9 +164,22 @@ async def import_device_groups(groups: List[dict]):
 
 ### FASE 4 - Integrações Avançadas
 
-#### 4.1 Integração com CRM
-- Conectar com CRM externo (HubSpot, Salesforce)
-- Sincronização bidirecional de contatos
+#### 4.1 Integração com CRM ✅
+- Conectar com CRM externo (HubSpot, Salesforce) ✅
+- Sincronização bidirecional de contatos ✅
+
+**Backend:**
+- Modelo `CrmIntegration` + helpers ✅
+- CRUD: `GET /api/crm/providers`, `POST/GET/PUT/DELETE /api/crm/integrations` ✅
+- Sync: `POST /api/crm/integrations/{id}/sync` (async httpx) ✅
+- `hubspot_sync_contacts()` — pull paginado + push por telefone (cria ou atualiza) ✅
+- `salesforce_sync_contacts()` — SOQL query + push REST ✅
+- Dependência: `httpx>=0.27` ✅
+
+**Frontend:**
+- `app/crm.tsx` — seletor de provedor, config de API Key + URL, botão de sincronizar, status ✅
+- Ícone cloud no header do tab navigator → /crm ✅
+- Rota registrada em `_layout.tsx` ✅
 
 #### 4.2 Webhook para Eventos
 - Sistema de webhooks configurável
@@ -250,4 +263,7 @@ EXPO_PUBLIC_BACKEND_URL=http://localhost:8000
 | 3.2 | Permissões de Usuário | ✅ Completo | 25/05/2026 |
 | 3.3 | Relatórios de Atividade | ✅ Completo | 26/05/2026 |
 | 3.4 | API Externa | ✅ Completo | 26/05/2026 |
-| 4.x | Integrações Avançadas | ❌ Pendente | - |
+| 4.1 | Integração com CRM | ✅ Completo | 26/05/2026 |
+| 4.2 | Webhook para Eventos | ❌ Pendente | - |
+| 4.3 | Plugin WhatsApp Business API | ❌ Pendente | - |
+| 4.4 | Exportação Completa (CSV/Excel) | ❌ Pendente | - |
