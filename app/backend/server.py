@@ -970,6 +970,104 @@ async def send_event_notification(event_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Notification failed: {str(e)}")
 
+# Report Routes
+@api_router.get("/reports/contacts-summary")
+async def get_contacts_summary(organizationId: Optional[str] = None):
+    """Get summary statistics about contacts"""
+    base_query = {}
+    if organizationId:
+        base_query["organizationId"] = organizationId
+    
+    total_contacts = await db.contacts.count_documents(base_query)
+    
+    favorite_query = {**base_query, "isFavorite": True}
+    total_favorites = await db.contacts.count_documents(favorite_query)
+    
+    # Count by tag
+    tag_pipeline = [
+        {"$match": base_query},
+        {"$unwind": "$tags"},
+        {"$group": {"_id": "$tags", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 20}
+    ]
+    tags_cursor = db.contacts.aggregate(tag_pipeline)
+    tags_data = await tags_cursor.to_list(20)
+    tags_summary = [{"tag": t["_id"], "count": t["count"]} for t in tags_data]
+    
+    # Groups count
+    total_groups = await db.groups.count_documents(base_query)
+    
+    # Events count
+    total_events = await db.events.count_documents(base_query)
+    
+    # Scheduled messages count
+    sms_query = {**base_query, "status": "pending"}
+    pending_messages = await db.scheduled_messages.count_documents(sms_query)
+    total_messages = await db.scheduled_messages.count_documents(base_query)
+    
+    # Contacts created last 7 days
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    new_this_week = await db.contacts.count_documents({
+        **base_query,
+        "createdAt": {"$gte": week_ago}
+    })
+    
+    return {
+        "totalContacts": total_contacts,
+        "totalFavorites": total_favorites,
+        "totalGroups": total_groups,
+        "totalEvents": total_events,
+        "pendingMessages": pending_messages,
+        "totalScheduledMessages": total_messages,
+        "newContactsThisWeek": new_this_week,
+        "tagsBreakdown": tags_summary
+    }
+
+@api_router.get("/reports/activity")
+async def get_activity(days: int = 30, organizationId: Optional[str] = None):
+    """Get contact creation activity over time"""
+    base_query = {}
+    if organizationId:
+        base_query["organizationId"] = organizationId
+    
+    since = datetime.utcnow() - timedelta(days=days)
+    base_query["createdAt"] = {"$gte": since}
+    
+    # Group contacts by day
+    pipeline = [
+        {"$match": base_query},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}},
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
+    cursor = db.contacts.aggregate(pipeline)
+    daily_data = await cursor.to_list(days)
+    
+    daily_activity = [{"date": d["_id"], "count": d["count"]} for d in daily_data]
+    
+    # Also get event activity
+    event_query = {**base_query}
+    events_pipeline = [
+        {"$match": event_query},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}},
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
+    event_cursor = db.events.aggregate(events_pipeline)
+    event_data = await event_cursor.to_list(days)
+    event_activity = [{"date": e["_id"], "count": e["count"]} for e in event_data]
+    
+    return {
+        "daily": daily_activity,
+        "events": event_activity,
+        "periodDays": days
+    }
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
