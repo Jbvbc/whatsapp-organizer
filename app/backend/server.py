@@ -3,7 +3,14 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHea
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+    MOTOR_AVAILABLE = True
+except ImportError:
+    AsyncIOMotorClient = None
+    MOTOR_AVAILABLE = False
+
+from mock_db import get_mock_db
 import os
 import logging
 from pathlib import Path
@@ -25,10 +32,17 @@ from collections import defaultdict, deque
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Database connection — MongoDB ou MockDB (JSON local)
+if os.environ.get('DB_TYPE') == 'mock' or not MOTOR_AVAILABLE:
+    logging.warning("Usando MockDB (armazenamento local em data.json)")
+    db = get_mock_db()
+else:
+    mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[os.environ.get('DB_NAME', 'whatsapp_organizer')]
+    logging.info("Usando MongoDB")
 
 # Create the main app
 app = FastAPI(
@@ -121,20 +135,11 @@ async def get_api_key_user(api_key: str = Depends(api_key_header)):
         "source": "api_key"
     }
 
-async def get_current_user_or_api_key(
-    jwt_user: dict = Depends(get_current_user),
-    api_key_user: dict = Depends(get_api_key_user),
-):
-    """Accept either JWT or API key authentication"""
-    if api_key_user:
-        return api_key_user
-    return jwt_user
-
 # Auth config
 SECRET_KEY = os.environ.get("JWT_SECRET", "super-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 security = HTTPBearer()
 
 class UserCreate(BaseModel):
@@ -197,6 +202,15 @@ def require_role(*roles: str):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user
     return role_checker
+
+async def get_current_user_or_api_key(
+    jwt_user: dict = Depends(get_current_user),
+    api_key_user: dict = Depends(get_api_key_user),
+):
+    """Accept either JWT or API key authentication"""
+    if api_key_user:
+        return api_key_user
+    return jwt_user
 
 # Auth Routes
 @api_router.post("/auth/register", response_model=TokenResponse, tags=["Auth"], summary="Register a new user")
@@ -605,9 +619,9 @@ async def sync_contacts(contacts: List[Contact]):
             contact_dict = contact.dict(exclude={"id"})
             contact_dict["createdAt"] = datetime.utcnow()
             contact_dict["updatedAt"] = datetime.utcnow()
-            await db.contacts.insert_one(contact_dict)
+            result = await db.contacts.insert_one(contact_dict)
             synced_count += 1
-            await dispatch_webhook_event("contact.created", {"id": str(contact_dict["_id"]), "name": contact.name, "phone": contact.phone, "tags": contact.tags})
+            await dispatch_webhook_event("contact.created", {"id": str(result.inserted_id), "name": contact.name, "phone": contact.phone, "tags": contact.tags})
     return {"message": f"Synced {synced_count} new contacts", "count": synced_count}
 
 @api_router.get("/contacts", tags=["Contacts"], summary="List all contacts with filters")
@@ -1187,8 +1201,6 @@ async def delete_webhook(webhook_id: str, user: dict = Depends(get_current_user_
         raise HTTPException(status_code=404, detail="Webhook not found")
     return {"message": "Webhook deleted successfully"}
 
-# Include router
-app.include_router(api_router)
 @api_router.post("/scheduled-messages", tags=["Scheduled Messages"], summary="Create a scheduled message")
 async def create_scheduled_message(scheduled_message: ScheduledMessage):
     """Schedule a message to be sent to a group at a specific time. Supports recurring patterns (daily, weekly, monthly)."""
@@ -2039,15 +2051,15 @@ app.add_middleware(
 )
 app.add_middleware(RateLimitMiddleware)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Include all routes (must be after all @api_router decorators)
+app.include_router(api_router)
+
 logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    if 'client' in dir() and client is not None:
+        client.close()
 
 # Background scheduler for checking scheduled messages
 from apscheduler.schedulers.asyncio import AsyncIOScheduler

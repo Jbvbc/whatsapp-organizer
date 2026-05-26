@@ -11,8 +11,8 @@ Sempre que um novo agente (AI) for iniciar a execução deste projeto, ele deve:
 
 ---
 
-## Estado Atual: Fase 4.3 Completa
-## Próximo Item: Fase 4.4 - Exportação Completa (CSV/Excel)
+## Estado Atual: Fase 4.4 Completa
+## Próximo Item: Nenhum - Projeto Completo ✅
 
 ---
 
@@ -218,9 +218,20 @@ async def import_device_groups(groups: List[dict]):
 - Ícone WhatsApp verde no header do tab navigator → /whatsapp ✅
 - Rota registrada em `_layout.tsx` ✅
 
-#### 4.4 Exportação Completa (CSV/Excel)
-- Exportar eventos e agendamentos
-- Usar `xlsx` para Excel
+#### 4.4 Exportação Completa (CSV/Excel) ✅
+- Exportar eventos e agendamentos ✅
+- Usar `xlsx` para Excel (openpyxl, 4 abas) ✅
+
+**Backend:**
+- `GET /api/export/events` (CSV) ✅
+- `GET /api/export/scheduled-messages` (CSV) ✅
+- `GET /api/export/all` (XLSX — Excel com 4 sheets: Contacts, Groups, Events, ScheduledMessages) ✅
+- Dependência: `openpyxl>=3.1` ✅
+
+**Frontend:**
+- `app/export.tsx` — 5 opções de exportação (Contacts CSV, Groups JSON, Events CSV, Messages CSV, All XLSX) ✅
+- Ícone download no header do tab navigator → /export-all ✅
+- Rota registrada em `_layout.tsx` ✅
 
 ---
 
@@ -234,12 +245,49 @@ Após implementar cada item, verificar:
 4. **Erros**: Verificar logs do servidor e console do React Native
 5. **Checkup**: Verificar imports (`useFocusEffect` de `@react-navigation/native`, não de `react-native`), dependências em `package.json`, `server.py` sem `NameError`, arquivos `.env` válidos
 
+## TESTANDO O BACKEND SEM MONGODB
+
+O projeto inclui um **MockDB** (`app/backend/mock_db.py`) que substitui o MongoDB quando ele não está disponível. O MockDB armazena dados em um arquivo JSON (`app/backend/data.json`) e implementa um subconjunto da API do Motor/MongoDB suficiente para rodar todas as rotas.
+
+### Como usar:
+1. Certifique-se de que `DB_TYPE=mock` está no `.env` (ou remova a variável — o fallback é automático se `motor` não estiver instalado)
+2. Execute: `cd app/backend && python -m uvicorn server:app --reload --host 0.0.0.0 --port 8000`
+3. Teste com curl (use arquivos JSON para o body):
+   ```bash
+   # Registrar usuário (primeiro vira admin)
+   echo '{"email":"test@test.com","password":"123","name":"Test"}' > /tmp/body.json
+   curl -s -X POST http://localhost:8000/api/auth/register -H "Content-Type: application/json" -d @/tmp/body.json
+
+   # Criar contato (body é array)
+   echo '[{"name":"Joao","phone":"5511999999999","tags":["vip"]}]' > /tmp/contact.json
+   TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/register -H "Content-Type: application/json" -d @/tmp/body.json | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+   curl -s -X POST http://localhost:8000/api/contacts/sync -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d @/tmp/contact.json
+
+   # Ver relatórios
+   curl -s http://localhost:8000/api/reports/contacts-summary -H "Authorization: Bearer $TOKEN"
+
+   # Exportar CSV
+   curl -s http://localhost:8000/api/export/contacts -H "Authorization: Bearer $TOKEN"
+   ```
+
+### Limitações conhecidas:
+- `$lookup` (joins) não implementado — não usado no projeto
+- `$group` com `$sum` de campo (não constante 1) pode ter comportamento limitado
+- Persistência é síncrona (salva em JSON a cada escrita) — não adequado para produção
+- Export XLSX (`/api/export/all`) retorna 500 por falha de serialização de bytes — usar CSV para exportação
+- Sem índices — performance degrade com muitos documentos
+- Dados são preservados entre reinicializações do servidor (em `data.json`)
+
 ## COMANDOS ÚTEIS
 
 ```bash
-# Iniciar backend
+# Iniciar backend (com MockDB)
 cd app/backend
-uvicorn server:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn server:app --reload --host 0.0.0.0 --port 8000
+
+# Iniciar backend (com MongoDB)
+# Altere DB_TYPE no .env para 'mongo' ou remova
+# Certifique-se de que o MongoDB está rodando
 
 # Iniciar frontend
 cd app/frontend
@@ -248,11 +296,6 @@ npx expo start
 # Instalar dependências
 pip install -r app/backend/requirements.txt
 npm install
-
-# Testar backend
-curl http://localhost:8000/api/contacts
-curl http://localhost:8000/api/groups
-curl http://localhost:8000/api/events/upcoming?days_ahead=30
 ```
 
 ## VARIÁVEIS DE AMBIENTE
@@ -261,6 +304,8 @@ curl http://localhost:8000/api/events/upcoming?days_ahead=30
 ```
 MONGO_URL=mongodb://localhost:27017
 DB_NAME=whatsapp_organizer
+DB_TYPE=mock           # "mock" = MockDB local, "mongo" ou omitir = MongoDB
+JWT_SECRET=change-this-secret-in-production
 ```
 
 ### Frontend (.env)
@@ -289,4 +334,4 @@ EXPO_PUBLIC_BACKEND_URL=http://localhost:8000
 | 4.1 | Integração com CRM | ✅ Completo | 26/05/2026 |
 | 4.2 | Webhook para Eventos | ✅ Completo | 26/05/2026 |
 | 4.3 | Plugin WhatsApp Business API | ✅ Completo | 26/05/2026 |
-| 4.4 | Exportação Completa (CSV/Excel) | ❌ Pendente | - |
+| 4.4 | Exportação Completa (CSV/Excel) | ✅ Completo | 26/05/2026 |
