@@ -51,6 +51,7 @@ app = FastAPI(
         {"name": "Backup & Export", "description": "Backup, restore, and data export"},
         {"name": "CRM", "description": "CRM integration (HubSpot, Salesforce) for contact sync"},
         {"name": "Webhooks", "description": "Webhook configuration for event-driven integrations"},
+        {"name": "WhatsApp", "description": "WhatsApp Business API integration for message sending and delivery tracking"},
     ],
 )
 api_router = APIRouter(prefix="/api")
@@ -419,6 +420,37 @@ class WebhookResponse(BaseModel):
     lastResponseStatus: Optional[int] = None
     createdAt: datetime
     updatedAt: datetime
+
+class WhatsAppConfigCreate(BaseModel):
+    phoneNumberId: str = Field(description="WhatsApp Business phone number ID")
+    accessToken: str = Field(description="WhatsApp Cloud API access token (long-lived)")
+    businessAccountId: Optional[str] = Field(None, description="WhatsApp Business Account ID")
+    webhookSecret: Optional[str] = Field(None, description="Verify token for WhatsApp webhook callback")
+    organizationId: Optional[str] = None
+
+class WhatsAppConfigUpdate(BaseModel):
+    phoneNumberId: Optional[str] = None
+    accessToken: Optional[str] = None
+    businessAccountId: Optional[str] = None
+    webhookSecret: Optional[str] = None
+    isActive: Optional[bool] = None
+
+class WhatsAppConfigResponse(BaseModel):
+    id: str
+    phoneNumberId: str
+    businessAccountId: Optional[str] = None
+    isActive: bool
+    organizationId: Optional[str] = None
+    createdAt: datetime
+    updatedAt: datetime
+
+class WhatsAppMessageStatus(BaseModel):
+    id: str
+    externalMessageId: str
+    scheduledMessageId: Optional[str] = None
+    recipientPhone: str
+    status: str  # sent, delivered, read, failed
+    timestamp: datetime
 
 # Helper function to convert ObjectId to string
 def contact_helper(contact) -> dict:
@@ -1229,17 +1261,22 @@ async def send_scheduled_message(message_id: str):
         if not group:
             raise HTTPException(status_code=404, detail="Group not found")
         
-        # Send message to WhatsApp (placeholder - would integrate with WhatsApp API)
-        await send_whatsapp_message(group, scheduled_message["message"])
+        # Send message via WhatsApp Business API
+        results = await send_whatsapp_message(group, scheduled_message["message"])
+        all_ok = all(r.get("success") for r in results) if results else False
         
-        # Update status to sent
+        new_status = "sent" if all_ok else "failed"
         await db.scheduled_messages.update_one(
             {"_id": ObjectId(message_id)},
-            {"$set": {"status": "sent", "updatedAt": datetime.utcnow()}}
+            {"$set": {"status": new_status, "updatedAt": datetime.utcnow()}}
         )
         
-        await dispatch_webhook_event("message.sent", {"id": message_id, "groupId": scheduled_message.get("groupId"), "status": "sent"})
-        return {"message": "Message sent successfully"}
+        await dispatch_webhook_event(f"message.{new_status}", {"id": message_id, "groupId": scheduled_message.get("groupId"), "status": new_status})
+        
+        if all_ok:
+            return {"message": "Message sent successfully", "results": results}
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to send to some contacts: {results}")
     except Exception as e:
         await db.scheduled_messages.update_one(
             {"_id": ObjectId(message_id)},
@@ -1248,12 +1285,209 @@ async def send_scheduled_message(message_id: str):
         await dispatch_webhook_event("message.failed", {"id": message_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
-def send_whatsapp_message(group: dict, message: str):
-    """Placeholder function to send WhatsApp messages"""
-    # In a real implementation, this would integrate with WhatsApp Business API
-    print(f"Sending message to group {group['name']}: {message}")
-    # Example URL for WhatsApp Web: https://web.whatsapp.com/send?text=message
-    return True
+def whatsapp_config_helper(doc) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "phoneNumberId": doc["phoneNumberId"],
+        "businessAccountId": doc.get("businessAccountId"),
+        "isActive": doc.get("isActive", True),
+        "organizationId": doc.get("organizationId"),
+        "createdAt": doc["createdAt"],
+        "updatedAt": doc["updatedAt"]
+    }
+
+def whatsapp_message_status_helper(doc) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "externalMessageId": doc["externalMessageId"],
+        "scheduledMessageId": doc.get("scheduledMessageId"),
+        "recipientPhone": doc["recipientPhone"],
+        "status": doc["status"],
+        "timestamp": doc["timestamp"]
+    }
+
+WHATSAPP_API_BASE = "https://graph.facebook.com/v18.0"
+
+async def _get_whatsapp_config(organization_id: Optional[str] = None) -> Optional[dict]:
+    """Get active WhatsApp Business API config"""
+    query = {"isActive": True}
+    if organization_id:
+        query["organizationId"] = organization_id
+    return await db.whatsapp_config.find_one(query)
+
+async def send_single_whatsapp_message(phone: str, message: str, scheduled_message_id: Optional[str] = None, organization_id: Optional[str] = None) -> dict:
+    """Send a WhatsApp message via Cloud API and track its status"""
+    config = await _get_whatsapp_config(organization_id)
+    if not config:
+        return {"success": False, "error": "WhatsApp not configured"}
+    
+    import httpx
+    url = f"{WHATSAPP_API_BASE}/{config['phoneNumberId']}/messages"
+    headers = {
+        "Authorization": f"Bearer {config['accessToken']}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "messaging_product": "whatsapp",
+        "to": phone,
+        "type": "text",
+        "text": {"body": message}
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json=body, headers=headers)
+            data = resp.json()
+            if resp.status_code == 200 or resp.status_code == 201:
+                wa_id = data.get("messages", [{}])[0].get("id", "")
+                if wa_id:
+                    await db.whatsapp_message_status.insert_one({
+                        "externalMessageId": wa_id,
+                        "scheduledMessageId": scheduled_message_id,
+                        "recipientPhone": phone,
+                        "status": "sent",
+                        "timestamp": datetime.utcnow(),
+                        "organizationId": organization_id
+                    })
+                return {"success": True, "waMessageId": wa_id}
+            else:
+                error = data.get("error", {}).get("message", str(data))
+                return {"success": False, "error": error}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+async def send_whatsapp_message(group: dict, message: str):
+    """Send WhatsApp message to all contacts in a group via Cloud API"""
+    contact_ids = [ObjectId(cid) for cid in group.get("contactIds", [])]
+    if not contact_ids:
+        return True
+    
+    contacts = await db.contacts.find({"_id": {"$in": contact_ids}}).to_list(1000)
+    org_id = group.get("organizationId")
+    results = []
+    
+    for contact in contacts:
+        phone = contact.get("phone", "")
+        if phone:
+            result = await send_single_whatsapp_message(phone, message, organization_id=org_id)
+            results.append(result)
+    
+    return all(r.get("success") for r in results)
+
+# WhatsApp Config Routes
+@api_router.post("/whatsapp/config", tags=["WhatsApp"], summary="Configure WhatsApp Business API")
+async def create_whatsapp_config(config: WhatsAppConfigCreate, user: dict = Depends(get_current_user_or_api_key)):
+    """Save WhatsApp Cloud API credentials. Only one active config per organization."""
+    # Deactivate any existing config for this org
+    existing_query = {}
+    if config.organizationId:
+        existing_query["organizationId"] = config.organizationId
+    await db.whatsapp_config.update_many(existing_query, {"$set": {"isActive": False}})
+    
+    doc = {
+        "phoneNumberId": config.phoneNumberId,
+        "accessToken": config.accessToken,
+        "businessAccountId": config.businessAccountId,
+        "webhookSecret": config.webhookSecret,
+        "organizationId": config.organizationId,
+        "userId": user["id"],
+        "isActive": True,
+        "createdAt": datetime.utcnow(),
+        "updatedAt": datetime.utcnow()
+    }
+    result = await db.whatsapp_config.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return whatsapp_config_helper(doc)
+
+@api_router.get("/whatsapp/config", tags=["WhatsApp"], summary="Get WhatsApp configuration")
+async def get_whatsapp_config(organizationId: Optional[str] = None, user: dict = Depends(get_current_user_or_api_key)):
+    """Returns the active WhatsApp Business API configuration."""
+    query = {"userId": user["id"], "isActive": True}
+    if organizationId:
+        query["organizationId"] = organizationId
+    doc = await db.whatsapp_config.find_one(query)
+    if not doc:
+        raise HTTPException(status_code=404, detail="WhatsApp not configured")
+    return whatsapp_config_helper(doc)
+
+@api_router.put("/whatsapp/config", tags=["WhatsApp"], summary="Update WhatsApp configuration")
+async def update_whatsapp_config(update: WhatsAppConfigUpdate, user: dict = Depends(get_current_user_or_api_key)):
+    """Update existing WhatsApp configuration."""
+    update_data = {k: v for k, v in update.dict(exclude_none=True).items()}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    update_data["updatedAt"] = datetime.utcnow()
+    result = await db.whatsapp_config.update_one(
+        {"userId": user["id"], "isActive": True},
+        {"$set": update_data}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="WhatsApp config not found")
+    doc = await db.whatsapp_config.find_one({"userId": user["id"], "isActive": True})
+    return whatsapp_config_helper(doc)
+
+@api_router.get("/whatsapp/status", tags=["WhatsApp"], summary="Get message delivery status")
+async def get_whatsapp_message_status(phone: Optional[str] = None, limit: int = 50, user: dict = Depends(get_current_user_or_api_key)):
+    """Returns delivery status of WhatsApp messages sent through the API."""
+    query = {}
+    if phone:
+        query["recipientPhone"] = phone
+    docs = await db.whatsapp_message_status.find(query).sort("timestamp", -1).to_list(limit)
+    return [whatsapp_message_status_helper(d) for d in docs]
+
+# WhatsApp Webhook receiver (outside /api prefix for Meta verification)
+@app.get("/whatsapp/webhook", tags=["WhatsApp"])
+async def whatsapp_webhook_verify(
+    hub_mode: Optional[str] = None,
+    hub_verify_token: Optional[str] = None,
+    hub_challenge: Optional[str] = None
+):
+    """WhatsApp Cloud API webhook verification endpoint (GET)"""
+    config = await _get_whatsapp_config()
+    if not config:
+        raise HTTPException(status_code=403, detail="WhatsApp not configured")
+    expected_token = config.get("webhookSecret", "")
+    if hub_mode == "subscribe" and hub_verify_token == expected_token:
+        return int(hub_challenge) if hub_challenge else 200
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+@app.post("/whatsapp/webhook", tags=["WhatsApp"])
+async def whatsapp_webhook_receive(payload: dict):
+    """Receive delivery status updates from WhatsApp Cloud API"""
+    try:
+        entries = payload.get("entry", [])
+        for entry in entries:
+            changes = entry.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                statuses = value.get("statuses", [])
+                for status in statuses:
+                    wa_id = status.get("id", "")
+                    status_name = status.get("status", "")  # sent, delivered, read, failed
+                    timestamp = status.get("timestamp", "")
+                    
+                    if wa_id:
+                        await db.whatsapp_message_status.update_one(
+                            {"externalMessageId": wa_id},
+                            {"$set": {
+                                "status": status_name,
+                                "timestamp": datetime.fromtimestamp(int(timestamp)) if timestamp else datetime.utcnow(),
+                                "updatedAt": datetime.utcnow()
+                            }}
+                        )
+                        
+                        # Also update scheduled message if linked
+                        msg_doc = await db.whatsapp_message_status.find_one({"externalMessageId": wa_id})
+                        if msg_doc and msg_doc.get("scheduledMessageId"):
+                            sms_status = "sent" if status_name in ("sent", "delivered", "read") else "failed"
+                            await db.scheduled_messages.update_one(
+                                {"_id": ObjectId(msg_doc["scheduledMessageId"])},
+                                {"$set": {"status": sms_status, "updatedAt": datetime.utcnow()}}
+                            )
+    except Exception:
+        pass
+    
+    return {"status": "ok"}
 
 # Backup and Restore Routes
 @api_router.get("/backup", tags=["Backup & Export"], summary="Create a full backup")

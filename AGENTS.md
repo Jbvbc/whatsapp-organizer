@@ -11,8 +11,8 @@ Sempre que um novo agente (AI) for iniciar a execução deste projeto, ele deve:
 
 ---
 
-## Estado Atual: Fase 4.1 Completa
-## Próximo Item: Fase 4.2 - Webhook para Eventos
+## Estado Atual: Fase 4.2 Completa
+## Próximo Item: Fase 4.3 - Plugin WhatsApp Business API
 
 ---
 
@@ -181,14 +181,22 @@ async def import_device_groups(groups: List[dict]):
 - Ícone cloud no header do tab navigator → /crm ✅
 - Rota registrada em `_layout.tsx` ✅
 
-#### 4.2 Webhook para Eventos
-- Sistema de webhooks configurável
-- Eventos: criação de contato, agendamento, envio de mensagem
+#### 4.2 Webhook para Eventos ✅
+- Sistema de webhooks configurável ✅
+- Eventos: criação de contato, agendamento, envio de mensagem ✅
 
 **Backend:**
-- Modelo: `Webhook`
-- Endpoint: `POST /api/webhooks`
-- Event dispatcher
+- Modelo: `Webhook` (url, events, name, secret, isActive, lastTriggeredAt, lastResponseStatus) ✅
+- CRUD: `POST/GET/PUT/DELETE /api/webhooks`, `GET /api/webhooks/events` ✅
+- Event dispatcher: `dispatch_webhook_event()` com `asyncio.create_task` ✅
+- 8 eventos: contact.created/updated/deleted, message.scheduled/sent/failed, event.created/upcoming ✅
+- HMAC signature via `X-Webhook-Signature` header (SHA256) ✅
+- Triggers em: sync_contacts, update_contact, delete_contact, create_scheduled_message, send_scheduled_message, create_event, check_birthdays ✅
+
+**Frontend:**
+- `app/webhooks.tsx` — criação com URL + secret + seleção de eventos (chips), listagem com status HTTP, toggle, excluir ✅
+- Ícone pulse no header do tab navigator → /webhooks ✅
+- Rota registrada em `_layout.tsx` ✅
 
 #### 4.3 Plugin WhatsApp Business API
 - Integração real com WhatsApp Business API
@@ -264,6 +272,6 @@ EXPO_PUBLIC_BACKEND_URL=http://localhost:8000
 | 3.3 | Relatórios de Atividade | ✅ Completo | 26/05/2026 |
 | 3.4 | API Externa | ✅ Completo | 26/05/2026 |
 | 4.1 | Integração com CRM | ✅ Completo | 26/05/2026 |
-| 4.2 | Webhook para Eventos | ❌ Pendente | - |
+| 4.2 | Webhook para Eventos | ✅ Completo | 26/05/2026 |
 | 4.3 | Plugin WhatsApp Business API | ❌ Pendente | - |
 | 4.4 | Exportação Completa (CSV/Excel) | ❌ Pendente | - |

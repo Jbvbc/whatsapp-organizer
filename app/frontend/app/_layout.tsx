@@ -160,6 +160,16 @@ function RootLayoutInner() {
             title: 'Webhooks'
           }} 
         />
+        <Stack.Screen 
+          name="whatsapp" 
+          options={{ 
+            presentation: 'modal',
+            headerShown: true,
+            headerStyle: { backgroundColor: colors.headerBg },
+            headerTintColor: colors.headerTint,
+            title: 'WhatsApp API'
+          }} 
+        />
       </Stack>
     </>
   );

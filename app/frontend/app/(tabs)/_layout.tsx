@@ -26,6 +26,9 @@ export default function TabLayout() {
         headerTintColor: colors.headerTint,
         headerRight: () => (
           <View style={{ flexDirection: 'row', alignItems: 'center', marginRight: 12, gap: 8 }}>
+            <TouchableOpacity onPress={() => router.push('/whatsapp')}>
+              <Ionicons name="logo-whatsapp" size={20} color="#25D366" />
+            </TouchableOpacity>
             <TouchableOpacity onPress={() => router.push('/webhooks')}>
               <Ionicons name="pulse" size={20} color={colors.headerTint} />
             </TouchableOpacity>

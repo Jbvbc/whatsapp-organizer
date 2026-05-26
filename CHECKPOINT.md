@@ -1,8 +1,8 @@
 # CHECKPOINT - WhatsApp Contact Organizer
 
 ## Data: 26/05/2026
-## Última ação concluída: CRM Integration (Fase 4.1)
-## Status: ✅ FASE 4.1 COMPLETA
+## Última ação concluída: Webhook para Eventos (Fase 4.2)
+## Status: ✅ FASE 4.2 COMPLETA
 
 ---
 
@@ -116,7 +116,7 @@
 ## 🔄 FASE 4 - PENDENTE (Integrações Avançadas)
 
 ### 4.1 Integração com CRM ✅
-### 4.2 Webhook para Eventos ❌
+### 4.2 Webhook para Eventos ✅
 ### 4.3 Plugin para WhatsApp Business API ❌
 ### 4.4 Exportação para CSV/Excel (parcial - contatos OK, grupos OK) ❌
 
@@ -160,8 +160,8 @@ APP WHATS/
 
 Para continuar, execute na ordem:
 
-1. **Fase 4.2** - Webhook para Eventos
-2. **Fase 4.3** - Plugin WhatsApp Business API
+1. **Fase 4.3** - Plugin WhatsApp Business API
+2. **Fase 4.4** - Exportação Completa (CSV/Excel)
 3. **Fase 4.4** - Exportação Completa (CSV/Excel)
 3. **Fase 4.3** - Plugin WhatsApp Business API
 4. **Fase 4.4** - Exportação Completa (CSV/Excel)
@@ -385,6 +385,60 @@ Para continuar, execute na ordem:
 | `app/frontend/app/_layout.tsx` | +rota crm como modal |
 | `app/frontend/app/(tabs)/_layout.tsx` | +ícone cloud no header → /crm |
 
+## ✅ Fase 4.2 — Webhook para Eventos (26/05/2026)
+
+### O que foi feito
+
+**Backend (`server.py`):**
+
+1. **Modelo `Webhook`** — campos: url, events (list), name, secret (HMAC), userId, isActive, lastTriggeredAt, lastResponseStatus
+2. **Modelos Pydantic:**
+   - `WebhookCreate` (url, events, name opcional, secret opcional)
+   - `WebhookUpdate` (url, events, name, secret, isActive — todos opcionais)
+   - `WebhookResponse` (id, url, events, name, isActive, lastTriggeredAt, lastResponseStatus, timestamps)
+3. **Helper:** `webhook_helper()` — formata doc MongoDB para response
+4. **8 eventos válidos:**
+   - `contact.created`, `contact.updated`, `contact.deleted`
+   - `message.scheduled`, `message.sent`, `message.failed`
+   - `event.created`, `event.upcoming`
+5. **CRUD endpoints:**
+   - `GET /api/webhooks/events` — lista tipos de eventos válidos
+   - `POST /api/webhooks` — registra novo webhook (valida eventos)
+   - `GET /api/webhooks` — lista webhooks do usuário
+   - `PUT /api/webhooks/{id}` — atualiza url, eventos, secret, status
+   - `DELETE /api/webhooks/{id}` — remove webhook
+6. **Event dispatcher:**
+   - `dispatch_webhook_event(event_type, payload)` — busca webhooks ativos inscritos no evento e dispara `asyncio.create_task`
+   - `send_webhook(wh, event_type, payload)` — POST com JSON assinado HMAC-SHA256 (se secret configurado)
+   - Atualiza `lastTriggeredAt` + `lastResponseStatus` no webhook
+7. **Triggers espalhados nas rotas:**
+   - `sync_contacts` → `contact.created`
+   - `update_contact` → `contact.updated`
+   - `delete_contact` → `contact.deleted`
+   - `create_scheduled_message` → `message.scheduled`
+   - `send_scheduled_message` → `message.sent` (sucesso) / `message.failed` (erro)
+   - `create_event` → `event.created`
+   - `check_birthdays` → `event.created` (para cada aniversário)
+
+**Frontend — `app/webhooks.tsx`:**
+
+1. **Formulário de criação** — URL, nome, secret (opcional), chips de seleção de eventos
+2. **Listagem** — cards com nome/url, eventos como tags, status HTTP da última chamada, toggle ativar/desativar
+3. **Ícone de status** — verde (2xx), vermelho (erro), cinza (nunca disparado)
+4. **Ativar/Desativar** — toggle sem excluir
+5. **Excluir** — confirmação antes de remover
+6. **Estado vazio** — ícone pulse-outline + instrução
+7. **Acesso:** ícone pulse no header do tab navigator → `/webhooks`
+
+**Arquivos criados/modificados:**
+
+| Arquivo | Mudança |
+|---------|---------|
+| `app/backend/server.py` | +modelos Webhook + helper + event dispatcher + CRUD webhooks + triggers em 7 rotas |
+| `app/frontend/app/webhooks.tsx` | **Novo** — tela de gerenciamento de webhooks |
+| `app/frontend/app/_layout.tsx` | +rota webhooks como modal |
+| `app/frontend/app/(tabs)/_layout.tsx` | +ícone pulse no header → /webhooks |
+
 ## ✅ Fase 3.4 — API Externa (26/05/2026)
 
 ### O que foi feito
@@ -557,6 +611,7 @@ APP WHATS/
 │           ├── organizations.tsx  # Gerenciamento de organizações ✅
 │           ├── api-keys.tsx       # Gerenciamento de API Keys ✅
 │           ├── crm.tsx            # Integração CRM ✅
+│           ├── webhooks.tsx       # Webhook event system ✅
 │           └── (tabs)/
 │               ├── _layout.tsx    # Tema dinâmico ✅
 │               ├── contacts.tsx   # + cache offline ✅
